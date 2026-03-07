@@ -4,7 +4,7 @@
  * Drop in /config/www/smart-suggestions-card.js
  */
 
-const CARD_VERSION = "1.0.0";
+const CARD_VERSION = "1.0.3";
 
 const DOMAIN_ICONS = {
   light: "mdi:lightbulb",
@@ -31,6 +31,12 @@ class SmartSuggestionsCard extends HTMLElement {
     this._expandedIndex = null;
     this._isRefreshing = false;
     this._lastStateStr = null;
+    // Streaming / add-on WebSocket state
+    this._ws = null;
+    this._wsConnected = false;
+    this._streamingBuffer = "";
+    this._wsRetryTimeout = null;
+    this._wsEnabled = false;
   }
 
   setConfig(config) {
@@ -42,9 +48,107 @@ class SmartSuggestionsCard extends HTMLElement {
       show_last_updated: config.show_last_updated !== false,
       accent_color: config.accent_color || null,
       empty_message: config.empty_message || "Thinking of suggestions…",
+      addon_url: config.addon_url || null,
       ...config,
     };
     this._render();
+    // Try to connect to the add-on WebSocket if a URL is configured
+    // or auto-detect via HA ingress slug
+    if (!this._wsEnabled) {
+      this._wsEnabled = true;
+      this._connectWS();
+    }
+  }
+
+  disconnectedCallback() {
+    this._wsEnabled = false;
+    if (this._ws) {
+      this._ws.close();
+      this._ws = null;
+    }
+    if (this._wsRetryTimeout) {
+      clearTimeout(this._wsRetryTimeout);
+      this._wsRetryTimeout = null;
+    }
+  }
+
+  _getAddonWsUrl() {
+    // Explicit URL from card config takes priority
+    if (this._config.addon_url) {
+      const base = this._config.addon_url.replace(/\/$/, "");
+      return base.replace(/^http/, "ws") + "/ws";
+    }
+    // Auto-detect: try the standard ingress path for the slug "smart_suggestions"
+    const protocol = location.protocol === "https:" ? "wss:" : "ws:";
+    return `${protocol}//${location.host}/api/hassio_ingress/smart_suggestions/ws`;
+  }
+
+  _connectWS() {
+    if (!this._wsEnabled) return;
+    const url = this._getAddonWsUrl();
+    try {
+      const ws = new WebSocket(url);
+      this._ws = ws;
+
+      ws.addEventListener("open", () => {
+        this._wsConnected = true;
+        console.info("[SmartSuggestions] Add-on WebSocket connected");
+      });
+
+      ws.addEventListener("message", (evt) => {
+        let msg;
+        try { msg = JSON.parse(evt.data); } catch { return; }
+        this._handleWsMessage(msg);
+      });
+
+      ws.addEventListener("close", () => {
+        this._wsConnected = false;
+        this._ws = null;
+        if (this._wsEnabled) {
+          // Retry with backoff (cap at 30s)
+          const delay = Math.min(30000, 5000);
+          this._wsRetryTimeout = setTimeout(() => this._connectWS(), delay);
+        }
+      });
+
+      ws.addEventListener("error", () => {
+        // Silently fall back to HA state polling — add-on may not be installed
+        ws.close();
+      });
+    } catch (_) {
+      // WebSocket constructor failed (e.g. invalid URL) — just use fallback
+    }
+  }
+
+  _handleWsMessage(msg) {
+    switch (msg.type) {
+      case "streaming": {
+        this._streamingBuffer += (msg.token || "");
+        // Show streaming state in the card header
+        if (!this._isRefreshing) {
+          this._isRefreshing = true;
+          this._render();
+        }
+        break;
+      }
+      case "suggestions": {
+        this._streamingBuffer = "";
+        this._isRefreshing = false;
+        // Directly inject suggestions — bypasses HA state polling
+        this._streamingSuggestions = Array.isArray(msg.data) ? msg.data : [];
+        this._render();
+        break;
+      }
+      case "status": {
+        const isUpdating = msg.state === "updating";
+        if (isUpdating !== this._isRefreshing) {
+          this._isRefreshing = isUpdating;
+          if (!isUpdating) this._streamingBuffer = "";
+          this._render();
+        }
+        break;
+      }
+    }
   }
 
   set hass(hass) {
@@ -58,6 +162,11 @@ class SmartSuggestionsCard extends HTMLElement {
   }
 
   _getSuggestions() {
+    // Prefer live suggestions pushed from add-on WebSocket
+    if (this._wsConnected && Array.isArray(this._streamingSuggestions) && this._streamingSuggestions.length) {
+      return this._streamingSuggestions;
+    }
+    // Fallback: read from HA state (works without the add-on)
     if (!this._hass) return [];
     const state = this._hass.states[this._config.entity];
     if (!state) return [];
@@ -66,6 +175,10 @@ class SmartSuggestionsCard extends HTMLElement {
   }
 
   _getStatus() {
+    // When the WebSocket is connected, use its status
+    if (this._wsConnected) {
+      return this._isRefreshing ? "updating" : "ready";
+    }
     if (!this._hass) return "idle";
     return this._hass.states[this._config.entity]?.state || "idle";
   }
@@ -198,6 +311,11 @@ class SmartSuggestionsCard extends HTMLElement {
       @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
       .status-dot { width: 7px; height: 7px; border-radius: 50%; background: ${accent}; opacity: ${isUpdating ? "1" : "0.4"}; animation: ${isUpdating ? "pulse 1s ease-in-out infinite" : "none"}; flex-shrink: 0; }
       @keyframes pulse { 0%, 100% { opacity: 0.4; transform: scale(1); } 50% { opacity: 1; transform: scale(1.3); } }
+      .streaming-indicator { font-size: 11px; color: ${accent}; opacity: 0.85; display: flex; align-items: center; gap: 4px; }
+      .typing-dots span { display: inline-block; width: 4px; height: 4px; border-radius: 50%; background: ${accent}; margin: 0 1px; animation: typing-bounce 1.2s ease-in-out infinite; }
+      .typing-dots span:nth-child(2) { animation-delay: 0.2s; }
+      .typing-dots span:nth-child(3) { animation-delay: 0.4s; }
+      @keyframes typing-bounce { 0%, 80%, 100% { transform: translateY(0); opacity: 0.4; } 40% { transform: translateY(-3px); opacity: 1; } }
       .list { padding: 6px 0; }
       .row { display: flex; flex-direction: column; border-bottom: 1px solid rgba(255,255,255,0.04); transition: background 0.15s; position: relative; overflow: hidden; }
       .row:last-child { border-bottom: none; }
@@ -238,9 +356,11 @@ class SmartSuggestionsCard extends HTMLElement {
           <div class="header-icon"><ha-icon icon="mdi:brain"></ha-icon></div>
           <div class="header-text">
             <div class="title">${this._config.title}</div>
-            ${this._config.show_last_updated && lastUpdated
-              ? `<div class="subtitle">Updated ${this._formatRelativeTime(lastUpdated)}</div>`
-              : `<div class="subtitle">Based on current context</div>`
+            ${isUpdating && this._wsConnected
+              ? `<div class="subtitle streaming-indicator"><span class="typing-dots"><span></span><span></span><span></span></span> Thinking…</div>`
+              : this._config.show_last_updated && lastUpdated
+                ? `<div class="subtitle">Updated ${this._formatRelativeTime(lastUpdated)}</div>`
+                : `<div class="subtitle">Based on current context</div>`
             }
           </div>
         </div>

@@ -35,8 +35,10 @@ class SmartSuggestionsCard extends HTMLElement {
     this._ws = null;
     this._wsConnected = false;
     this._streamingBuffer = "";
+    this._streamingSuggestions = [];
     this._wsRetryTimeout = null;
     this._wsEnabled = false;
+    this._wsRetryDelay = 5000;
   }
 
   setConfig(config) {
@@ -105,9 +107,9 @@ class SmartSuggestionsCard extends HTMLElement {
         this._wsConnected = false;
         this._ws = null;
         if (this._wsEnabled) {
-          // Retry with backoff (cap at 30s)
-          const delay = Math.min(30000, 5000);
-          this._wsRetryTimeout = setTimeout(() => this._connectWS(), delay);
+          // Retry with exponential backoff capped at 30s
+          this._wsRetryTimeout = setTimeout(() => this._connectWS(), this._wsRetryDelay);
+          this._wsRetryDelay = Math.min(30000, this._wsRetryDelay * 2);
         }
       });
 

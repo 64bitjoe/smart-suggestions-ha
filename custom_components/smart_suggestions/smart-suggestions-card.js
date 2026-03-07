@@ -4,7 +4,7 @@
  * Drop in /config/www/smart-suggestions-card.js
  */
 
-const CARD_VERSION = "1.0.12";
+const CARD_VERSION = "1.0.13";
 
 const DOMAIN_ICONS = {
   light: "mdi:lightbulb",
@@ -229,13 +229,28 @@ class SmartSuggestionsCard extends HTMLElement {
   async _callAction(suggestion) {
     if (!this._hass) return;
     const { entity_id, action, action_data, type } = suggestion;
+
+    // Navigate actions don't need an entity
+    if (action === "navigate" && action_data?.path) {
+      history.pushState(null, "", action_data.path);
+      window.dispatchEvent(new PopStateEvent("popstate"));
+      return;
+    }
+
+    if (!entity_id) {
+      console.warn("[SmartSuggestions] Suggestion has no entity_id — skipping", suggestion);
+      return;
+    }
+
     const domain = entity_id.split(".")[0];
+
+    // Guard: entity must exist in HA before calling a service
+    if (!this._hass.states[entity_id] && domain !== "scene" && domain !== "script" && domain !== "automation") {
+      console.warn("[SmartSuggestions] Entity not in HA states — skipping:", entity_id);
+      return;
+    }
+
     try {
-      if (action === "navigate" && action_data?.path) {
-        history.pushState(null, "", action_data.path);
-        window.dispatchEvent(new PopStateEvent("popstate"));
-        return;
-      }
       if (domain === "scene") {
         await this._hass.callService("scene", "turn_on", { entity_id });
         this._flashRow(entity_id);

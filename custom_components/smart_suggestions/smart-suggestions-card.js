@@ -4,7 +4,7 @@
  * Drop in /config/www/smart-suggestions-card.js
  */
 
-const CARD_VERSION = "1.0.16";
+const CARD_VERSION = "1.0.17";
 
 const DOMAIN_ICONS = {
   light: "mdi:lightbulb",
@@ -713,9 +713,9 @@ class SmartSuggestionsCardEditor extends HTMLElement {
     const q = (id) => this.shadowRoot.querySelector(`#${id}`);
 
     q("entity")?.addEventListener("value-changed", (e) => this._setValue("entity", e.detail.value));
-    q("title")?.addEventListener("change", (e) => this._setValue("title", e.target.value));
+    q("title")?.addEventListener("input", (e) => this._setValue("title", e.target.value));
     q("icon")?.addEventListener("value-changed", (e) => this._setValue("icon", e.detail.value));
-    q("empty_message")?.addEventListener("change", (e) => this._setValue("empty_message", e.target.value));
+    q("empty_message")?.addEventListener("input", (e) => this._setValue("empty_message", e.target.value));
 
     for (const key of ["show_title", "show_refresh", "show_last_updated"]) {
       q(key)?.addEventListener("change", (e) => this._setValue(key, e.target.checked));

@@ -2,38 +2,12 @@
   "config": {
     "step": {
       "user": {
-        "title": "Connect to Ollama",
-        "description": "Enter your Ollama server details. Make sure Ollama is running and reachable from Home Assistant.",
-        "data": {
-          "ollama_url": "Ollama URL",
-          "ollama_model": "Model name",
-          "refresh_interval": "Refresh interval (minutes)",
-          "max_suggestions": "Max suggestions"
-        }
+        "title": "Smart Suggestions",
+        "description": "This installs the Smart Suggestions Lovelace card. Configure Ollama settings in the Smart Suggestions Add-on."
       }
-    },
-    "error": {
-      "cannot_connect": "Cannot connect to Ollama. Check the URL and make sure Ollama is running."
     },
     "abort": {
       "already_configured": "Smart Suggestions is already configured."
-    }
-  },
-  "options": {
-    "step": {
-      "init": {
-        "title": "Smart Suggestions Options",
-        "data": {
-          "ollama_url": "Ollama URL",
-          "ollama_model": "Model name",
-          "refresh_interval": "Refresh interval (minutes)",
-          "max_suggestions": "Max suggestions",
-          "watch_entities": "Watch entities (trigger refresh on state change)",
-          "available_entities": "Available entities (LLM can suggest actions for these)",
-          "available_automations": "Available automations",
-          "available_scripts": "Available scripts"
-        }
-      }
     }
   }
 }

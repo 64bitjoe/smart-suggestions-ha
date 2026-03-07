@@ -1,0 +1,12 @@
+{
+  "domain": "smart_suggestions",
+  "name": "Smart Suggestions",
+  "version": "1.0.0",
+  "documentation": "https://github.com/64bitjoe/smart-suggestions-ha",
+  "issue_tracker": "https://github.com/64bitjoe/smart-suggestions-ha/issues",
+  "requirements": [],
+  "dependencies": [],
+  "codeowners": ["@64bitjoe"],
+  "iot_class": "local_polling",
+  "integration_type": "hub"
+}

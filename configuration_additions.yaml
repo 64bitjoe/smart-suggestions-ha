@@ -1,0 +1,129 @@
+# ============================================================
+# Smart Suggestions - configuration.yaml additions
+# ============================================================
+# Add this block to your configuration.yaml
+# Adjust entity lists to match your own setup
+
+smart_suggestions:
+  # --- Ollama connection ---
+  ollama_url: "http://YOUR_OLLAMA_IP:11434"   # e.g. http://192.168.1.50:11434
+  ollama_model: "llama3.2"                    # or llama3.1, mistral, gemma2, etc.
+
+  # --- Refresh schedule (minutes) ---
+  refresh_interval: 10
+
+  # --- How many suggestions to show ---
+  max_suggestions: 7
+
+  # --- Entities to WATCH for state-change triggered refreshes ---
+  # These are the entities whose state changes will trigger a re-evaluation
+  watch_entities:
+    - binary_sensor.front_door
+    - binary_sensor.presence_home
+    - media_player.living_room_tv
+    - climate.living_room
+    - input_boolean.guest_mode
+    - device_tracker.joe_phone          # swap for your tracker
+
+  # --- Entities the LLM can suggest actions for ---
+  # Give it everything you want surfaced as a potential suggestion
+  available_entities:
+    # Lights
+    - light.living_room
+    - light.kitchen
+    - light.bedroom
+    - light.office
+    - light.outdoor_front
+    # Climate
+    - climate.living_room
+    - climate.bedroom
+    # Media
+    - media_player.living_room_tv
+    - media_player.bedroom_speaker
+    # Covers / blinds
+    - cover.living_room_blinds
+    # Switches / smart plugs
+    - switch.coffee_maker
+    - switch.desk_lamp
+    # Locks
+    - lock.front_door
+    # Vacuum
+    - vacuum.margaret              # your Ecovacs
+    # 3D Printer
+    - sensor.bambu_printer_status
+
+  # --- Automations the LLM can suggest triggering ---
+  available_automations:
+    - automation.good_morning_routine
+    - automation.good_night_routine
+    - automation.away_mode
+    - automation.movie_mode
+    - automation.guest_mode_on
+    - automation.doorbell_snapshot
+
+  # --- Scripts the LLM can suggest running ---
+  available_scripts:
+    - script.start_print_job_check
+    - script.vacuum_downstairs
+    - script.reset_all_lights
+
+
+# ============================================================
+# Lovelace card resource (add to configuration.yaml OR via UI)
+# ============================================================
+# Option A: In configuration.yaml
+lovelace:
+  resources:
+    - url: /local/smart-suggestions-card.js
+      type: module
+
+# Option B: Via UI
+# Settings → Dashboards → ⋮ → Resources → Add Resource
+# URL: /local/smart-suggestions-card.js
+# Type: JavaScript Module
+
+
+# ============================================================
+# Lovelace card config (add to your dashboard YAML)
+# ============================================================
+# type: custom:smart-suggestions-card
+# entity: smart_suggestions.suggestions
+# title: "Suggested for You"
+# show_title: true
+# show_refresh: true
+# show_last_updated: true
+# accent_color: "#3b82f6"          # optional, defaults to HA primary color
+# empty_message: "Thinking…"       # optional
+
+
+# ============================================================
+# Optional: Manual refresh automation
+# (the integration handles scheduled + state-change refreshes
+#  automatically — this is just an extra trigger if you want it)
+# ============================================================
+
+automation:
+  - alias: "Smart Suggestions - Refresh on Arrival"
+    description: "Re-evaluate suggestions when someone arrives home"
+    trigger:
+      - platform: state
+        entity_id: device_tracker.joe_phone
+        to: "home"
+    action:
+      - service: smart_suggestions.refresh
+
+  - alias: "Smart Suggestions - Morning Refresh"
+    description: "Fresh suggestions at wake-up time"
+    trigger:
+      - platform: time
+        at: "06:30:00"
+    action:
+      - service: smart_suggestions.refresh
+
+  - alias: "Smart Suggestions - Evening Refresh"
+    description: "Fresh suggestions at evening time"
+    trigger:
+      - platform: time
+        at: "18:00:00"
+    action:
+      - service: smart_suggestions.refresh

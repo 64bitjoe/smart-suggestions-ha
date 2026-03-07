@@ -4,7 +4,7 @@
  * Drop in /config/www/smart-suggestions-card.js
  */
 
-const CARD_VERSION = "1.0.13";
+const CARD_VERSION = "1.0.14";
 
 const DOMAIN_ICONS = {
   light: "mdi:lightbulb",
@@ -573,15 +573,24 @@ class SmartSuggestionsCardEditor extends HTMLElement {
   }
 
   setConfig(config) {
-    if (JSON.stringify(config) === JSON.stringify(this._config)) return;
+    // Sort keys before comparing so key-order differences don't cause false re-renders
+    const sig = (o) => JSON.stringify(o, Object.keys(o || {}).sort());
+    if (sig(config) === sig(this._config)) return;
     this._config = { ...config };
     if (Object.keys(this._config).length) this._render();
   }
 
   set hass(hass) {
     this._hass = hass;
-    // Re-render so entity picker can access hass if it loaded late
-    if (Object.keys(this._config).length) this._render();
+    // Update entity picker in-place — never re-render the whole editor on hass
+    // updates (HA calls this on every state change, causing constant DOM wipeout)
+    const picker = this.shadowRoot?.querySelector("ha-entity-picker");
+    if (picker) {
+      picker.hass = hass;
+    } else if (Object.keys(this._config).length) {
+      // Editor not rendered yet — do initial render now that hass is available
+      this._render();
+    }
   }
 
   _fire(config) {

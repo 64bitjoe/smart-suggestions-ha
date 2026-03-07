@@ -9,6 +9,7 @@ from pathlib import Path
 import aiohttp
 import voluptuous as vol
 
+from homeassistant.components import frontend
 from homeassistant.components.http import StaticPathConfig
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
@@ -80,9 +81,10 @@ async def _register_static_path(hass: HomeAssistant) -> None:
         StaticPathConfig(
             f"/{DOMAIN}/smart-suggestions-card.js",
             str(_CARD_JS),
-            cache_headers=True,
+            cache_headers=False,
         )
     ])
+    frontend.add_extra_js_url(hass, f"/{DOMAIN}/smart-suggestions-card.js")
     _static_path_registered = True
 
 

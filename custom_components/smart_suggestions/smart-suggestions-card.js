@@ -4,7 +4,7 @@
  * Drop in /config/www/smart-suggestions-card.js
  */
 
-const CARD_VERSION = "1.0.15";
+const CARD_VERSION = "1.0.16";
 
 const DOMAIN_ICONS = {
   light: "mdi:lightbulb",
@@ -587,26 +587,22 @@ class SmartSuggestionsCardEditor extends HTMLElement {
     this.attachShadow({ mode: "open" });
     this._config = {};
     this._hass = null;
+    this._domBuilt = false;
   }
 
   setConfig(config) {
-    // Sort keys before comparing so key-order differences don't cause false re-renders
-    const sig = (o) => JSON.stringify(o, Object.keys(o || {}).sort());
-    if (sig(config) === sig(this._config)) return;
     this._config = { ...config };
-    if (Object.keys(this._config).length) this._render();
+    this._render();
   }
 
   set hass(hass) {
     this._hass = hass;
-    // Update entity picker in-place — never re-render the whole editor on hass
-    // updates (HA calls this on every state change, causing constant DOM wipeout)
-    const picker = this.shadowRoot?.querySelector("ha-entity-picker");
-    if (picker) {
-      picker.hass = hass;
-    } else if (Object.keys(this._config).length) {
-      // Editor not rendered yet — do initial render now that hass is available
+    if (!this._domBuilt && Object.keys(this._config).length) {
       this._render();
+    } else {
+      // Just update the entity picker in-place — never re-build DOM here
+      const picker = this.shadowRoot?.querySelector("ha-entity-picker");
+      if (picker) picker.hass = hass;
     }
   }
 
@@ -615,18 +611,34 @@ class SmartSuggestionsCardEditor extends HTMLElement {
   }
 
   _setValue(key, value) {
+    // No-op guard: prevents picker re-fire loops and unnecessary config-changed events
+    if (this._config[key] === value) return;
     this._config = { ...this._config, [key]: value };
     this._fire(this._config);
   }
 
-  _render() {
-    const c = this._config;
+  // Returns true if el or any descendant within the shadow root is focused
+  _hasFocus(el) {
+    if (!el) return false;
+    const active = this.shadowRoot.activeElement;
+    return active === el || el.contains(active);
+  }
 
+  _render() {
+    if (!this._domBuilt) {
+      this._buildDOM();
+      this._attachListeners();
+      this._domBuilt = true;
+    }
+    this._syncFields();
+  }
+
+  _buildDOM() {
     this.shadowRoot.innerHTML = `
       <style>
         .editor { display: flex; flex-direction: column; gap: 16px; padding: 4px 0; }
         .section-title { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.07em; color: var(--secondary-text-color); margin-bottom: -6px; }
-        ha-textfield { width: 100%; }
+        ha-textfield, ha-icon-picker { width: 100%; }
         .toggle-row { display: flex; align-items: center; justify-content: space-between; height: 40px; }
         .toggle-label { font-size: 14px; color: var(--primary-text-color); }
         .color-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
@@ -636,107 +648,86 @@ class SmartSuggestionsCardEditor extends HTMLElement {
       </style>
       <div class="editor">
         <div class="section-title">Data</div>
-
-        <ha-entity-picker
-          id="entity"
-          label="Suggestions entity"
-          .value="${c.entity || "smart_suggestions.suggestions"}"
-          .hass="${this._hass}"
-          allow-custom-entity
-        ></ha-entity-picker>
-
+        <ha-entity-picker id="entity" label="Suggestions entity" allow-custom-entity></ha-entity-picker>
         <div class="section-title">Display</div>
-
-        <ha-textfield
-          id="title"
-          label="Card title"
-          .value="${c.title !== undefined ? c.title : "Suggested for You"}"
-        ></ha-textfield>
-
-        <ha-icon-picker
-          id="icon"
-          label="Header icon"
-          .value="${c.icon || 'mdi:sparkles'}"
-        ></ha-icon-picker>
-
+        <ha-textfield id="title" label="Card title"></ha-textfield>
+        <ha-icon-picker id="icon" label="Header icon"></ha-icon-picker>
         <div class="toggle-row">
           <span class="toggle-label">Show title</span>
-          <ha-switch id="show_title" ?checked="${c.show_title !== false}"></ha-switch>
+          <ha-switch id="show_title"></ha-switch>
         </div>
-
         <div class="toggle-row">
           <span class="toggle-label">Show refresh button</span>
-          <ha-switch id="show_refresh" ?checked="${c.show_refresh !== false}"></ha-switch>
+          <ha-switch id="show_refresh"></ha-switch>
         </div>
-
         <div class="toggle-row">
           <span class="toggle-label">Show last updated time</span>
-          <ha-switch id="show_last_updated" ?checked="${c.show_last_updated !== false}"></ha-switch>
+          <ha-switch id="show_last_updated"></ha-switch>
         </div>
-
-        <ha-textfield
-          id="empty_message"
-          label="Empty state message"
-          .value="${c.empty_message || "Thinking of suggestions…"}"
-        ></ha-textfield>
-
+        <ha-textfield id="empty_message" label="Empty state message"></ha-textfield>
         <div class="color-row">
-          <label for="accent_color">Accent colour</label>
-          <input type="color" id="accent_color" value="${c.accent_color || "#3b82f6"}">
+          <label>Accent colour</label>
+          <input type="color" id="accent_color">
           <span class="color-clear" id="color-clear">Reset</span>
         </div>
       </div>
     `;
+  }
 
-    this._attachListeners();
+  _syncFields() {
+    const c = this._config;
+    const q = (id) => this.shadowRoot.querySelector(`#${id}`);
+
+    const entity = q("entity");
+    if (entity) {
+      entity.hass = this._hass;
+      entity.value = c.entity || "smart_suggestions.suggestions";
+    }
+
+    // Only update text fields if they don't have focus (user may be mid-type)
+    const title = q("title");
+    if (title && !this._hasFocus(title)) {
+      title.value = c.title !== undefined ? c.title : "Suggested for You";
+    }
+
+    const icon = q("icon");
+    if (icon && !this._hasFocus(icon)) {
+      icon.value = c.icon || "mdi:sparkles";
+    }
+
+    const empty = q("empty_message");
+    if (empty && !this._hasFocus(empty)) {
+      empty.value = c.empty_message || "Thinking of suggestions…";
+    }
+
+    for (const key of ["show_title", "show_refresh", "show_last_updated"]) {
+      const el = q(key);
+      if (el) el.checked = c[key] !== false;
+    }
+
+    const color = q("accent_color");
+    if (color) color.value = c.accent_color || "#3b82f6";
   }
 
   _attachListeners() {
     const q = (id) => this.shadowRoot.querySelector(`#${id}`);
 
-    const entityPicker = q("entity");
-    if (entityPicker) {
-      entityPicker.addEventListener("value-changed", (e) => {
-        this._setValue("entity", e.detail.value);
-      });
-    }
-
-    const titleField = q("title");
-    if (titleField) {
-      titleField.addEventListener("change", (e) => this._setValue("title", e.target.value));
-    }
-
-    const iconPicker = q("icon");
-    if (iconPicker) {
-      iconPicker.addEventListener("value-changed", (e) => this._setValue("icon", e.detail.value));
-    }
-
-    const emptyField = q("empty_message");
-    if (emptyField) {
-      emptyField.addEventListener("change", (e) => this._setValue("empty_message", e.target.value));
-    }
+    q("entity")?.addEventListener("value-changed", (e) => this._setValue("entity", e.detail.value));
+    q("title")?.addEventListener("change", (e) => this._setValue("title", e.target.value));
+    q("icon")?.addEventListener("value-changed", (e) => this._setValue("icon", e.detail.value));
+    q("empty_message")?.addEventListener("change", (e) => this._setValue("empty_message", e.target.value));
 
     for (const key of ["show_title", "show_refresh", "show_last_updated"]) {
-      const el = q(key);
-      if (el) {
-        el.addEventListener("change", (e) => this._setValue(key, e.target.checked));
-      }
+      q(key)?.addEventListener("change", (e) => this._setValue(key, e.target.checked));
     }
 
-    const colorInput = q("accent_color");
-    if (colorInput) {
-      colorInput.addEventListener("input", (e) => this._setValue("accent_color", e.target.value));
-    }
+    q("accent_color")?.addEventListener("input", (e) => this._setValue("accent_color", e.target.value));
 
-    const colorClear = q("color-clear");
-    if (colorClear) {
-      colorClear.addEventListener("click", () => {
-        this._config = { ...this._config };
-        delete this._config.accent_color;
-        this._fire(this._config);
-        this._render();
-      });
-    }
+    q("color-clear")?.addEventListener("click", () => {
+      delete this._config.accent_color;
+      this._fire(this._config);
+      this._syncFields();
+    });
   }
 }
 

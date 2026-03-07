@@ -1,7 +1,7 @@
 {
   "domain": "smart_suggestions",
   "name": "Smart Suggestions",
-  "version": "1.0.8",
+  "version": "1.0.9",
   "documentation": "https://github.com/64bitjoe/smart-suggestions-ha",
   "issue_tracker": "https://github.com/64bitjoe/smart-suggestions-ha/issues",
   "requirements": [],

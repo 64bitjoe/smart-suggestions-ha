@@ -4,7 +4,7 @@
  * Drop in /config/www/smart-suggestions-card.js
  */
 
-const CARD_VERSION = "1.0.4";
+const CARD_VERSION = "1.0.5";
 
 const DOMAIN_ICONS = {
   light: "mdi:lightbulb",
@@ -20,6 +20,23 @@ const DOMAIN_ICONS = {
   script: "mdi:script-text",
   scene: "mdi:palette",
   input_boolean: "mdi:toggle-switch",
+};
+
+// iOS system colour palette — one per domain
+const DOMAIN_COLORS = {
+  light:         "#FF9F0A",
+  switch:        "#007AFF",
+  climate:       "#FF6B35",
+  media_player:  "#FF2D55",
+  cover:         "#34C759",
+  fan:           "#30D5C8",
+  lock:          "#8E8E93",
+  vacuum:        "#007AFF",
+  camera:        "#8E8E93",
+  automation:    "#AF52DE",
+  script:        "#5E5CE6",
+  scene:         "#BF5AF2",
+  input_boolean: "#007AFF",
 };
 
 class SmartSuggestionsCard extends HTMLElement {
@@ -212,21 +229,26 @@ class SmartSuggestionsCard extends HTMLElement {
   async _callAction(suggestion) {
     if (!this._hass) return;
     const { entity_id, action, action_data, type } = suggestion;
+    const domain = entity_id.split(".")[0];
     try {
       if (action === "navigate" && action_data?.path) {
         history.pushState(null, "", action_data.path);
         window.dispatchEvent(new PopStateEvent("popstate"));
         return;
       }
-      if (type === "automation" || action === "trigger") {
+      if (domain === "scene") {
+        await this._hass.callService("scene", "turn_on", { entity_id });
+        this._flashRow(entity_id);
+        return;
+      }
+      if (domain === "automation" || type === "automation") {
         await this._hass.callService("automation", "trigger", { entity_id });
         return;
       }
-      if (type === "script") {
+      if (domain === "script" || type === "script") {
         await this._hass.callService("script", "turn_on", { entity_id });
         return;
       }
-      const domain = entity_id.split(".")[0];
       const svc = action || "toggle";
       await this._hass.callService(domain, svc, {
         entity_id,
@@ -236,6 +258,14 @@ class SmartSuggestionsCard extends HTMLElement {
     } catch (e) {
       console.error("[SmartSuggestions] Action failed:", e);
     }
+  }
+
+  _showMoreInfo(entityId) {
+    this.dispatchEvent(new CustomEvent("hass-more-info", {
+      bubbles: true,
+      composed: true,
+      detail: { entityId },
+    }));
   }
 
   _flashRow(entityId) {
@@ -285,7 +315,7 @@ class SmartSuggestionsCard extends HTMLElement {
   }
 
   _render() {
-    const accent = this._config.accent_color || "var(--primary-color, #3b82f6)";
+    const accent = this._config.accent_color || "#007AFF";
     const suggestions = this._getSuggestions();
     const status = this._getStatus();
     const isUpdating = status === "updating" || this._isRefreshing;
@@ -293,59 +323,81 @@ class SmartSuggestionsCard extends HTMLElement {
 
     const styles = `
       *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-      :host { display: block; font-family: 'Segoe UI', system-ui, -apple-system, sans-serif; }
-      .card { background: var(--ha-card-background, var(--card-background-color, #1c1c1e)); border-radius: 16px; overflow: hidden; border: 1px solid rgba(255,255,255,0.06); }
-      .header { display: flex; align-items: center; justify-content: space-between; padding: 16px 16px 12px; border-bottom: 1px solid rgba(255,255,255,0.05); }
-      .header-left { display: flex; align-items: center; gap: 10px; }
-      .header-icon { width: 32px; height: 32px; border-radius: 9px; background: ${accent}; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
-      .header-icon ha-icon { --mdc-icon-size: 18px; color: white; }
-      .title { font-size: 14px; font-weight: 600; color: var(--primary-text-color, #f1f1f1); letter-spacing: -0.01em; line-height: 1.2; }
-      .subtitle { font-size: 11px; color: var(--secondary-text-color, #888); margin-top: 1px; }
-      .header-actions { display: flex; align-items: center; gap: 6px; }
-      .refresh-btn { width: 30px; height: 30px; border-radius: 8px; background: rgba(255,255,255,0.06); border: none; cursor: pointer; display: flex; align-items: center; justify-content: center; transition: background 0.15s; color: var(--secondary-text-color, #888); }
-      .refresh-btn:hover { background: rgba(255,255,255,0.1); }
-      .refresh-btn ha-icon { --mdc-icon-size: 16px; transition: transform 0.6s ease; }
+      :host { display: block; font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', system-ui, sans-serif; }
+      .card { background: var(--ha-card-background, #1C1C1E); border-radius: 16px; overflow: hidden; }
+
+      /* ── Header ── */
+      .header { display: flex; align-items: center; justify-content: space-between; padding: 14px 16px 12px; }
+      .header-left { display: flex; align-items: center; gap: 9px; }
+      .header-icon { width: 30px; height: 30px; border-radius: 8px; background: ${accent}; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
+      .header-icon ha-icon { --mdc-icon-size: 17px; color: #fff; }
+      .header-text { display: flex; flex-direction: column; }
+      .title { font-size: 15px; font-weight: 600; color: var(--primary-text-color, #fff); letter-spacing: -0.3px; line-height: 1.2; }
+      .subtitle { font-size: 12px; color: var(--secondary-text-color, #8E8E93); margin-top: 1px; display: flex; align-items: center; gap: 4px; }
+      .header-right { display: flex; align-items: center; gap: 4px; }
+      .refresh-btn { background: none; border: none; cursor: pointer; padding: 4px; display: flex; align-items: center; justify-content: center; color: ${accent}; -webkit-tap-highlight-color: transparent; border-radius: 50%; }
+      .refresh-btn ha-icon { --mdc-icon-size: 20px; }
       .refresh-btn.spinning ha-icon { animation: spin 1s linear infinite; }
       @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
-      .status-dot { width: 7px; height: 7px; border-radius: 50%; background: ${accent}; opacity: ${isUpdating ? "1" : "0.4"}; animation: ${isUpdating ? "pulse 1s ease-in-out infinite" : "none"}; flex-shrink: 0; }
-      @keyframes pulse { 0%, 100% { opacity: 0.4; transform: scale(1); } 50% { opacity: 1; transform: scale(1.3); } }
-      .streaming-indicator { font-size: 11px; color: ${accent}; opacity: 0.85; display: flex; align-items: center; gap: 4px; }
-      .typing-dots span { display: inline-block; width: 4px; height: 4px; border-radius: 50%; background: ${accent}; margin: 0 1px; animation: typing-bounce 1.2s ease-in-out infinite; }
+
+      /* ── Typing dots ── */
+      .typing-dots span { display: inline-block; width: 3px; height: 3px; border-radius: 50%; background: ${accent}; margin: 0 1px; animation: tdot 1.2s ease-in-out infinite; vertical-align: middle; }
       .typing-dots span:nth-child(2) { animation-delay: 0.2s; }
       .typing-dots span:nth-child(3) { animation-delay: 0.4s; }
-      @keyframes typing-bounce { 0%, 80%, 100% { transform: translateY(0); opacity: 0.4; } 40% { transform: translateY(-3px); opacity: 1; } }
-      .list { padding: 6px 0; }
-      .row { display: flex; flex-direction: column; border-bottom: 1px solid rgba(255,255,255,0.04); transition: background 0.15s; position: relative; overflow: hidden; }
-      .row:last-child { border-bottom: none; }
-      .row.flash { animation: flash-bg 0.7s ease; }
-      @keyframes flash-bg { 0% { background: rgba(74,222,128,0); } 30% { background: rgba(74,222,128,0.15); } 100% { background: rgba(74,222,128,0); } }
-      .row-main { display: flex; align-items: center; padding: 10px 14px; cursor: pointer; gap: 12px; user-select: none; -webkit-tap-highlight-color: transparent; }
-      .row-main:hover { background: rgba(255,255,255,0.03); }
-      .row-main:active { background: rgba(255,255,255,0.06); }
-      .icon-wrap { width: 38px; height: 38px; border-radius: 11px; background: rgba(255,255,255,0.07); display: flex; align-items: center; justify-content: center; flex-shrink: 0; position: relative; }
-      .icon-wrap ha-icon { --mdc-icon-size: 20px; color: var(--primary-text-color, #e8e8e8); }
-      .action-dot { position: absolute; bottom: 3px; right: 3px; width: 7px; height: 7px; border-radius: 50%; border: 1.5px solid var(--ha-card-background, #1c1c1e); }
-      .row-info { flex: 1; min-width: 0; }
-      .row-name { font-size: 13.5px; font-weight: 500; color: var(--primary-text-color, #f1f1f1); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; line-height: 1.3; }
-      .row-meta { font-size: 11.5px; color: var(--secondary-text-color, #777); margin-top: 1px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-      .row-actions { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
-      .info-btn { width: 28px; height: 28px; border-radius: 8px; background: rgba(255,255,255,0.06); border: none; cursor: pointer; display: flex; align-items: center; justify-content: center; color: var(--secondary-text-color, #777); transition: background 0.15s, color 0.15s; flex-shrink: 0; }
-      .info-btn:hover, .info-btn.active { background: ${accent}22; color: ${accent}; }
-      .info-btn ha-icon { --mdc-icon-size: 15px; }
-      .reason-panel { padding: 0 14px 12px 64px; display: none; animation: slide-down 0.2s ease; }
-      .reason-panel.open { display: block; }
-      @keyframes slide-down { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: translateY(0); } }
-      .reason-bubble { background: rgba(255,255,255,0.05); border-left: 2px solid ${accent}; border-radius: 0 8px 8px 0; padding: 8px 12px; font-size: 12px; line-height: 1.5; color: var(--secondary-text-color, #aaa); }
-      .reason-label { font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; color: ${accent}; margin-bottom: 3px; opacity: 0.8; }
-      .empty { padding: 32px 20px; text-align: center; color: var(--secondary-text-color, #666); font-size: 13px; }
-      .empty ha-icon { --mdc-icon-size: 36px; display: block; margin: 0 auto 10px; opacity: 0.3; }
-      .skeleton { padding: 8px 14px; display: flex; align-items: center; gap: 12px; }
-      .skel-icon { width: 38px; height: 38px; border-radius: 11px; background: rgba(255,255,255,0.07); animation: shimmer 1.5s ease-in-out infinite; flex-shrink: 0; }
+      @keyframes tdot { 0%,80%,100% { transform: translateY(0); opacity: 0.35; } 40% { transform: translateY(-2px); opacity: 1; } }
+
+      /* ── Inset grouped list ── */
+      .list-wrap { margin: 0 12px 14px; border-radius: 12px; overflow: hidden; background: rgba(255,255,255,0.07); }
+
+      /* ── Row ── */
+      .row { display: flex; flex-direction: column; position: relative; }
+      .row + .row .row-main::before { content: ''; position: absolute; top: 0; left: 62px; right: 0; height: 0.5px; background: rgba(255,255,255,0.09); }
+      .row-main { display: flex; align-items: center; padding: 10px 12px 10px 14px; min-height: 56px; cursor: pointer; gap: 12px; user-select: none; -webkit-tap-highlight-color: transparent; position: relative; transition: background 0.12s; }
+      .row-main:active { background: rgba(255,255,255,0.07); }
+
+      /* ── Domain icon ── */
+      .icon-wrap { width: 36px; height: 36px; border-radius: 9px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; cursor: pointer; }
+      .icon-wrap ha-icon { --mdc-icon-size: 20px; color: #fff; }
+
+      /* ── Row text ── */
+      .row-text { flex: 1; min-width: 0; }
+      .row-name { font-size: 15px; font-weight: 400; color: var(--primary-text-color, #fff); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; line-height: 1.3; }
+      .row-sub { font-size: 12px; color: var(--secondary-text-color, #8E8E93); margin-top: 1px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+      /* ── Info button ── */
+      .info-btn { width: 30px; height: 30px; border-radius: 50%; background: none; border: none; cursor: pointer; display: flex; align-items: center; justify-content: center; color: ${accent}; opacity: 0.65; -webkit-tap-highlight-color: transparent; flex-shrink: 0; transition: opacity 0.15s; }
+      .info-btn:active, .info-btn.active { opacity: 1; }
+      .info-btn ha-icon { --mdc-icon-size: 19px; }
+
+      /* ── Reason expansion ── */
+      .reason-panel { overflow: hidden; max-height: 0; transition: max-height 0.28s cubic-bezier(0.4,0,0.2,1); }
+      .reason-panel.open { max-height: 150px; }
+      .reason-inner { padding: 8px 14px 13px 62px; font-size: 13px; line-height: 1.55; color: var(--secondary-text-color, #8E8E93); border-top: 0.5px solid rgba(255,255,255,0.07); }
+
+      /* ── Flash ── */
+      .row.flash .row-main { animation: flash-row 0.6s ease; }
+      @keyframes flash-row { 0% { background: rgba(52,199,89,0); } 25% { background: rgba(52,199,89,0.14); } 100% { background: rgba(52,199,89,0); } }
+
+      /* ── Empty ── */
+      .empty { padding: 36px 20px; text-align: center; color: var(--secondary-text-color, #8E8E93); font-size: 14px; }
+      .empty ha-icon { --mdc-icon-size: 38px; display: block; margin: 0 auto 10px; opacity: 0.22; }
+
+      /* ── Skeleton ── */
+      .skel-wrap { margin: 0 12px 14px; border-radius: 12px; overflow: hidden; background: rgba(255,255,255,0.07); }
+      .skeleton { display: flex; align-items: center; gap: 12px; padding: 10px 14px; min-height: 56px; }
+      .skeleton + .skeleton { border-top: 0.5px solid rgba(255,255,255,0.06); }
+      .skel-icon { width: 36px; height: 36px; border-radius: 9px; background: rgba(255,255,255,0.1); animation: shimmer 1.4s ease-in-out infinite; flex-shrink: 0; }
       .skel-lines { flex: 1; }
-      .skel-line { height: 10px; border-radius: 5px; background: rgba(255,255,255,0.07); animation: shimmer 1.5s ease-in-out infinite; margin-bottom: 6px; }
-      .skel-line:last-child { width: 60%; margin-bottom: 0; }
-      @keyframes shimmer { 0%, 100% { opacity: 0.4; } 50% { opacity: 0.7; } }
+      .skel-line { height: 11px; border-radius: 6px; background: rgba(255,255,255,0.1); animation: shimmer 1.4s ease-in-out infinite; margin-bottom: 7px; }
+      .skel-line.short { width: 55%; margin-bottom: 0; }
+      @keyframes shimmer { 0%,100% { opacity: 0.35; } 50% { opacity: 0.65; } }
     `;
+
+    const subtitleHtml = isUpdating
+      ? `<span class="typing-dots"><span></span><span></span><span></span></span> Thinking…`
+      : this._config.show_last_updated && lastUpdated
+        ? `Updated ${this._formatRelativeTime(lastUpdated)}`
+        : `Based on current context`;
 
     const headerHtml = this._config.show_title ? `
       <div class="header">
@@ -353,85 +405,70 @@ class SmartSuggestionsCard extends HTMLElement {
           <div class="header-icon"><ha-icon icon="mdi:sparkles"></ha-icon></div>
           <div class="header-text">
             <div class="title">${this._config.title}</div>
-            ${isUpdating && this._wsConnected
-              ? `<div class="subtitle streaming-indicator"><span class="typing-dots"><span></span><span></span><span></span></span> Thinking…</div>`
-              : this._config.show_last_updated && lastUpdated
-                ? `<div class="subtitle">Updated ${this._formatRelativeTime(lastUpdated)}</div>`
-                : `<div class="subtitle">Based on current context</div>`
-            }
+            <div class="subtitle">${subtitleHtml}</div>
           </div>
         </div>
-        <div class="header-actions">
-          <div class="status-dot"></div>
+        <div class="header-right">
           ${this._config.show_refresh ? `
-            <button class="refresh-btn ${isUpdating || this._isRefreshing ? "spinning" : ""}" id="refresh-btn" title="Refresh suggestions">
-              <ha-icon icon="mdi:refresh"></ha-icon>
+            <button class="refresh-btn ${isUpdating ? "spinning" : ""}" id="refresh-btn">
+              <ha-icon icon="mdi:arrow.clockwise" onerror="this.setAttribute('icon','mdi:refresh')"></ha-icon>
             </button>
           ` : ""}
         </div>
       </div>
     ` : "";
 
-    let listHtml = "";
+    let bodyHtml = "";
 
     if (isUpdating && suggestions.length === 0) {
-      listHtml = `<div class="list">` + Array(4).fill(0).map(() => `
+      bodyHtml = `<div class="skel-wrap">` + Array(4).fill(0).map(() => `
         <div class="skeleton">
           <div class="skel-icon"></div>
-          <div class="skel-lines"><div class="skel-line"></div><div class="skel-line"></div></div>
+          <div class="skel-lines"><div class="skel-line"></div><div class="skel-line short"></div></div>
         </div>
       `).join("") + `</div>`;
     } else if (suggestions.length === 0) {
-      listHtml = `<div class="empty"><ha-icon icon="mdi:shimmer"></ha-icon>${this._config.empty_message}</div>`;
+      bodyHtml = `<div class="empty"><ha-icon icon="mdi:shimmer"></ha-icon>${this._config.empty_message}</div>`;
     } else {
       const rows = suggestions.map((s, i) => {
         const icon = this._resolveIcon(s);
-        const actionDotColor = this._getActionDot(s.action);
+        const domain = s.entity_id?.split(".")[0] || "";
+        const iconColor = DOMAIN_COLORS[domain] || "#8E8E93";
         const actionLabel = this._getActionLabel(s.action);
         const isExpanded = this._expandedIndex === i;
-        let metaText = actionLabel;
+        let subText = actionLabel;
         if (s.entity_id && this._hass) {
-          const entityState = this._hass.states[s.entity_id];
-          if (entityState) {
-            const domain = s.entity_id.split(".")[0];
-            if (domain !== "automation" && domain !== "script") {
-              metaText = `${actionLabel} · ${entityState.state}`;
-            }
+          const st = this._hass.states[s.entity_id];
+          if (st && domain !== "automation" && domain !== "script" && domain !== "scene") {
+            subText = `${actionLabel} · ${st.state}`;
           }
         }
         return `
           <div class="row" data-entity="${s.entity_id || ""}" data-index="${i}">
             <div class="row-main" data-action="${i}">
-
-              <div class="icon-wrap">
+              <div class="icon-wrap" data-more-info="${s.entity_id || ""}" style="background:${iconColor}">
                 <ha-icon icon="${icon}"></ha-icon>
-                <div class="action-dot" style="background:${actionDotColor}"></div>
               </div>
-              <div class="row-info">
+              <div class="row-text">
                 <div class="row-name">${s.name || s.entity_id}</div>
-                <div class="row-meta">${metaText}</div>
+                <div class="row-sub">${subText}</div>
               </div>
-              <div class="row-actions">
-                <button class="info-btn ${isExpanded ? "active" : ""}" data-info="${i}" title="Why this suggestion?">
-                  <ha-icon icon="mdi:information-outline"></ha-icon>
-                </button>
-              </div>
+              <button class="info-btn ${isExpanded ? "active" : ""}" data-info="${i}">
+                <ha-icon icon="mdi:information-outline"></ha-icon>
+              </button>
             </div>
             <div class="reason-panel ${isExpanded ? "open" : ""}">
-              <div class="reason-bubble">
-                <div class="reason-label">Why suggested</div>
-                ${s.reason || "No reason provided."}
-              </div>
+              <div class="reason-inner">${s.reason || "No reason provided."}</div>
             </div>
           </div>
         `;
       }).join("");
-      listHtml = `<div class="list">${rows}</div>`;
+      bodyHtml = `<div class="list-wrap">${rows}</div>`;
     }
 
     this.shadowRoot.innerHTML = `
       <style>${styles}</style>
-      <ha-card class="card">${headerHtml}${listHtml}</ha-card>
+      <ha-card class="card">${headerHtml}${bodyHtml}</ha-card>
     `;
     this._attachListeners();
   }
@@ -441,14 +478,26 @@ class SmartSuggestionsCard extends HTMLElement {
     if (refreshBtn) {
       refreshBtn.addEventListener("click", (e) => { e.stopPropagation(); this._triggerRefresh(); });
     }
+    // Row tap → execute action (skip if icon or info button was the target)
     this.shadowRoot.querySelectorAll("[data-action]").forEach((el) => {
       el.addEventListener("click", (e) => {
-        if (e.target.closest("[data-info]")) return;
+        if (e.target.closest("[data-info]") || e.target.closest("[data-more-info]")) return;
         const index = parseInt(el.dataset.action);
         const suggestions = this._getSuggestions();
         if (suggestions[index]) this._callAction(suggestions[index]);
       });
     });
+    // Icon tap / long press → more-info popup
+    this.shadowRoot.querySelectorAll("[data-more-info]").forEach((el) => {
+      const handler = (e) => {
+        e.stopPropagation();
+        const eid = el.dataset.moreInfo;
+        if (eid) this._showMoreInfo(eid);
+      };
+      el.addEventListener("click", handler);
+      el.addEventListener("contextmenu", (e) => { e.preventDefault(); handler(e); });
+    });
+    // Info button → expand reason
     this.shadowRoot.querySelectorAll("[data-info]").forEach((el) => {
       el.addEventListener("click", (e) => {
         e.stopPropagation();

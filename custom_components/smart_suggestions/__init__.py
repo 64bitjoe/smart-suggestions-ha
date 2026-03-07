@@ -1,48 +1,42 @@
 """Smart Suggestions - AI-powered contextual suggestions for Home Assistant."""
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any
 
 import aiohttp
 import voluptuous as vol
 
 from homeassistant.components.http import StaticPathConfig
-from homeassistant.components.sensor import SensorEntity
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
-from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.event import (
     async_track_state_change_event,
     async_track_time_interval,
 )
 from homeassistant.helpers.typing import ConfigType
 
+from .const import (
+    CONF_AVAILABLE_AUTOMATIONS,
+    CONF_AVAILABLE_ENTITIES,
+    CONF_AVAILABLE_SCRIPTS,
+    CONF_MAX_SUGGESTIONS,
+    CONF_OLLAMA_MODEL,
+    CONF_OLLAMA_URL,
+    CONF_REFRESH_INTERVAL,
+    CONF_WATCH_ENTITIES,
+    DEFAULT_MAX_SUGGESTIONS,
+    DEFAULT_MODEL,
+    DEFAULT_OLLAMA_URL,
+    DEFAULT_REFRESH_INTERVAL,
+    DOMAIN,
+)
+
 _LOGGER = logging.getLogger(__name__)
-
-DOMAIN = "smart_suggestions"
-PLATFORMS = [Platform.SENSOR]
-
-CONF_OLLAMA_URL = "ollama_url"
-CONF_OLLAMA_MODEL = "ollama_model"
-CONF_WATCH_ENTITIES = "watch_entities"
-CONF_AVAILABLE_ENTITIES = "available_entities"
-CONF_AVAILABLE_AUTOMATIONS = "available_automations"
-CONF_AVAILABLE_SCRIPTS = "available_scripts"
-CONF_REFRESH_INTERVAL = "refresh_interval"
-CONF_MAX_SUGGESTIONS = "max_suggestions"
-
-DEFAULT_OLLAMA_URL = "http://localhost:11434"
-DEFAULT_MODEL = "llama3.2"
-DEFAULT_REFRESH_INTERVAL = 10  # minutes
-DEFAULT_MAX_SUGGESTIONS = 7
 
 CONFIG_SCHEMA = vol.Schema(
     {
@@ -74,6 +68,23 @@ CONFIG_SCHEMA = vol.Schema(
     extra=vol.ALLOW_EXTRA,
 )
 
+_CARD_JS = Path(__file__).parent / "smart-suggestions-card.js"
+_static_path_registered = False
+
+
+async def _register_static_path(hass: HomeAssistant) -> None:
+    global _static_path_registered
+    if _static_path_registered:
+        return
+    await hass.http.async_register_static_paths([
+        StaticPathConfig(
+            f"/{DOMAIN}/smart-suggestions-card.js",
+            str(_CARD_JS),
+            cache_headers=True,
+        )
+    ])
+    _static_path_registered = True
+
 
 async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     """Set up Smart Suggestions from configuration.yaml."""
@@ -81,45 +92,66 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
         return True
 
     conf = config[DOMAIN]
-    hass.data[DOMAIN] = conf
+    hass.data.setdefault(DOMAIN, {})
+    hass.data[DOMAIN]["yaml_conf"] = conf
 
-    await hass.http.async_register_static_paths([
-        StaticPathConfig(
-            f"/{DOMAIN}/smart-suggestions-card.js",
-            str(Path(__file__).parent / "smart-suggestions-card.js"),
-            cache_headers=True,
-        )
-    ])
-
-    hass.async_create_task(
-        _async_setup_sensor(hass, conf)
-    )
-
+    await _register_static_path(hass)
+    hass.async_create_task(_async_setup_sensor(hass, conf, entry_id="yaml"))
     return True
 
 
-async def _async_setup_sensor(hass: HomeAssistant, conf: dict) -> None:
-    """Set up the suggestions sensor."""
+async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+    """Set up Smart Suggestions from a config entry."""
+    conf = {**entry.data, **entry.options}
+    hass.data.setdefault(DOMAIN, {})
+
+    await _register_static_path(hass)
+    await _async_setup_sensor(hass, conf, entry_id=entry.entry_id)
+
+    entry.async_on_unload(entry.add_update_listener(_async_update_listener))
+    return True
+
+
+async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+    """Unload a config entry."""
+    entry_data = hass.data.get(DOMAIN, {}).pop(entry.entry_id, {})
+    sensor: SmartSuggestionsSensor | None = entry_data.get("sensor")
+    if sensor:
+        if sensor._unsub_state:
+            sensor._unsub_state()
+        if sensor._unsub_time:
+            sensor._unsub_time()
+    return True
+
+
+async def _async_update_listener(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    await hass.config_entries.async_reload(entry.entry_id)
+
+
+async def _async_setup_sensor(
+    hass: HomeAssistant, conf: dict, entry_id: str
+) -> None:
+    """Shared sensor setup for both YAML and config entry paths."""
     sensor = SmartSuggestionsSensor(hass, conf)
     await sensor.async_added_to_hass_manual()
 
-    # Register as a persistent entity
+    hass.data.setdefault(DOMAIN, {})[entry_id] = {"sensor": sensor}
+
     hass.states.async_set(
         f"{DOMAIN}.suggestions",
         "idle",
         {"suggestions": [], "last_updated": None, "friendly_name": "Smart Suggestions"},
     )
 
-    # Store sensor reference
-    hass.data[f"{DOMAIN}_sensor"] = sensor
+    if not hass.services.has_service(DOMAIN, "refresh"):
+        async def handle_refresh(call):
+            for data in hass.data.get(DOMAIN, {}).values():
+                s = data.get("sensor") if isinstance(data, dict) else None
+                if s:
+                    await s.async_update_suggestions()
 
-    # Register service to manually trigger refresh
-    async def handle_refresh(call):
-        await sensor.async_update_suggestions()
+        hass.services.async_register(DOMAIN, "refresh", handle_refresh)
 
-    hass.services.async_register(DOMAIN, "refresh", handle_refresh)
-
-    # Initial fetch
     await sensor.async_update_suggestions()
 
 
@@ -127,23 +159,20 @@ class SmartSuggestionsSensor:
     """Sensor that holds AI-generated suggestions."""
 
     def __init__(self, hass: HomeAssistant, conf: dict) -> None:
-        """Initialize the sensor."""
         self.hass = hass
-        self._conf = conf
         self._ollama_url = conf.get(CONF_OLLAMA_URL, DEFAULT_OLLAMA_URL)
         self._model = conf.get(CONF_OLLAMA_MODEL, DEFAULT_MODEL)
         self._watch_entities = conf.get(CONF_WATCH_ENTITIES, [])
         self._available_entities = conf.get(CONF_AVAILABLE_ENTITIES, [])
         self._available_automations = conf.get(CONF_AVAILABLE_AUTOMATIONS, [])
         self._available_scripts = conf.get(CONF_AVAILABLE_SCRIPTS, [])
-        self._refresh_interval = conf.get(CONF_REFRESH_INTERVAL, DEFAULT_REFRESH_INTERVAL)
-        self._max_suggestions = conf.get(CONF_MAX_SUGGESTIONS, DEFAULT_MAX_SUGGESTIONS)
+        self._refresh_interval = int(conf.get(CONF_REFRESH_INTERVAL, DEFAULT_REFRESH_INTERVAL))
+        self._max_suggestions = int(conf.get(CONF_MAX_SUGGESTIONS, DEFAULT_MAX_SUGGESTIONS))
         self._suggestions = []
         self._unsub_state = None
         self._unsub_time = None
 
     async def async_added_to_hass_manual(self) -> None:
-        """Set up listeners."""
         if self._watch_entities:
             self._unsub_state = async_track_state_change_event(
                 self.hass,
@@ -159,19 +188,14 @@ class SmartSuggestionsSensor:
 
     @callback
     def _handle_state_change(self, event) -> None:
-        """Handle watched entity state changes."""
         self.hass.async_create_task(self.async_update_suggestions())
 
     @callback
     def _handle_time_interval(self, now) -> None:
-        """Handle scheduled refresh."""
         self.hass.async_create_task(self.async_update_suggestions())
 
     def _build_context(self) -> dict:
-        """Build context payload from current HA state."""
         now = datetime.now()
-
-        # Time context
         hour = now.hour
         if 5 <= hour < 9:
             time_period = "early morning"
@@ -196,11 +220,7 @@ class SmartSuggestionsSensor:
             "available_actions": [],
         }
 
-        # Collect states of all relevant entities
-        all_entity_ids = list(
-            set(self._watch_entities + self._available_entities)
-        )
-
+        all_entity_ids = list(set(self._watch_entities + self._available_entities))
         for entity_id in all_entity_ids:
             state = self.hass.states.get(entity_id)
             if state:
@@ -210,62 +230,41 @@ class SmartSuggestionsSensor:
                     "attributes": {
                         k: v
                         for k, v in state.attributes.items()
-                        if k
-                        not in ("entity_picture", "icon", "supported_features")
+                        if k not in ("entity_picture", "icon", "supported_features")
                         and not isinstance(v, (list, dict))
                     },
                 }
 
-        # Available actions
         for entity_id in self._available_entities:
             state = self.hass.states.get(entity_id)
             if state:
-                domain = entity_id.split(".")[0]
-                name = state.attributes.get("friendly_name", entity_id)
                 context["available_actions"].append(
                     {
                         "type": "entity",
                         "entity_id": entity_id,
-                        "name": name,
+                        "name": state.attributes.get("friendly_name", entity_id),
                         "current_state": state.state,
-                        "domain": domain,
+                        "domain": entity_id.split(".")[0],
                     }
                 )
 
         for automation_id in self._available_automations:
             state = self.hass.states.get(automation_id)
-            name = (
-                state.attributes.get("friendly_name", automation_id)
-                if state
-                else automation_id
-            )
+            name = state.attributes.get("friendly_name", automation_id) if state else automation_id
             context["available_actions"].append(
-                {
-                    "type": "automation",
-                    "entity_id": automation_id,
-                    "name": name,
-                }
+                {"type": "automation", "entity_id": automation_id, "name": name}
             )
 
         for script_id in self._available_scripts:
             state = self.hass.states.get(script_id)
-            name = (
-                state.attributes.get("friendly_name", script_id)
-                if state
-                else script_id
-            )
+            name = state.attributes.get("friendly_name", script_id) if state else script_id
             context["available_actions"].append(
-                {
-                    "type": "script",
-                    "entity_id": script_id,
-                    "name": name,
-                }
+                {"type": "script", "entity_id": script_id, "name": name}
             )
 
         return context
 
     def _build_prompt(self, context: dict) -> str:
-        """Build the LLM prompt."""
         return f"""You are a smart home assistant. Based on the current context, suggest the most relevant actions a user might want to take RIGHT NOW.
 
 CONTEXT:
@@ -277,7 +276,7 @@ AVAILABLE ACTIONS:
 
 Return ONLY a valid JSON array (no markdown, no explanation) with {self._max_suggestions} suggestions ranked by relevance. Each suggestion must have:
 - "entity_id": the entity_id to act on
-- "name": friendly display name  
+- "name": friendly display name
 - "action": one of "toggle", "turn_on", "turn_off", "trigger", "navigate"
 - "action_data": optional dict of service call data (e.g. {{"brightness_pct": 50}})
 - "reason": a SHORT 1-sentence explanation of WHY this is suggested right now (be specific to the context)
@@ -287,7 +286,6 @@ Return ONLY a valid JSON array (no markdown, no explanation) with {self._max_sug
 Only suggest actions that make contextual sense RIGHT NOW. Do not suggest turning something off that is already off."""
 
     async def async_update_suggestions(self) -> None:
-        """Fetch new suggestions from Ollama."""
         _LOGGER.debug("Fetching smart suggestions from Ollama")
 
         self.hass.states.async_set(
@@ -303,7 +301,6 @@ Only suggest actions that make contextual sense RIGHT NOW. Do not suggest turnin
         try:
             context = self._build_context()
             prompt = self._build_prompt(context)
-
             session = async_get_clientsession(self.hass)
 
             payload = {
@@ -311,10 +308,7 @@ Only suggest actions that make contextual sense RIGHT NOW. Do not suggest turnin
                 "prompt": prompt,
                 "stream": False,
                 "format": "json",
-                "options": {
-                    "temperature": 0.3,
-                    "num_predict": 2048,
-                },
+                "options": {"temperature": 0.3, "num_predict": 2048},
             }
 
             async with session.post(
@@ -325,11 +319,9 @@ Only suggest actions that make contextual sense RIGHT NOW. Do not suggest turnin
                 if resp.status != 200:
                     _LOGGER.error("Ollama returned status %s", resp.status)
                     return
-
                 data = await resp.json()
                 raw_response = data.get("response", "")
 
-            # Parse JSON response - strip markdown fences if present
             clean = raw_response.strip()
             if clean.startswith("```"):
                 clean = clean.split("```")[1]
@@ -342,10 +334,7 @@ Only suggest actions that make contextual sense RIGHT NOW. Do not suggest turnin
                 suggestions = suggestions.get("suggestions", [])
 
             self._suggestions = suggestions[: self._max_suggestions]
-
-            _LOGGER.info(
-                "Smart Suggestions updated: %d suggestions", len(self._suggestions)
-            )
+            _LOGGER.info("Smart Suggestions updated: %d suggestions", len(self._suggestions))
 
         except json.JSONDecodeError as e:
             _LOGGER.error("Failed to parse Ollama response as JSON: %s", e)

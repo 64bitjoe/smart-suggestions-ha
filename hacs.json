@@ -1,5 +1,6 @@
 {
   "name": "Smart Suggestions",
   "render_readme": true,
-  "homeassistant": "2023.9.0"
+  "homeassistant": "2023.9.0",
+  "filename": "dist/smart-suggestions-card.js"
 }

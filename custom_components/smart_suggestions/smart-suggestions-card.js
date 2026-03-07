@@ -4,7 +4,7 @@
  * Drop in /config/www/smart-suggestions-card.js
  */
 
-const CARD_VERSION = "1.0.11";
+const CARD_VERSION = "1.0.12";
 
 const DOMAIN_ICONS = {
   light: "mdi:lightbulb",
@@ -345,8 +345,14 @@ class SmartSuggestionsCard extends HTMLElement {
       .typing-dots span:nth-child(3) { animation-delay: 0.4s; }
       @keyframes tdot { 0%,80%,100% { transform: translateY(0); opacity: 0.35; } 40% { transform: translateY(-2px); opacity: 1; } }
 
+      /* ── Sections ── */
+      .sections { margin: 0 12px 14px; }
+      .section-header { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.07em; color: var(--secondary-text-color, #8E8E93); padding: 10px 2px 5px; }
+      .sections > .section-header:first-child { padding-top: 0; }
+
       /* ── Inset grouped list ── */
-      .list-wrap { margin: 0 12px 14px; border-radius: 12px; overflow: hidden; background: rgba(255,255,255,0.07); }
+      .list-wrap { border-radius: 12px; overflow: hidden; background: rgba(255,255,255,0.07); margin-bottom: 6px; }
+      .sections .list-wrap:last-child { margin-bottom: 0; }
 
       /* ── Row ── */
       .row { display: flex; flex-direction: column; position: relative; }
@@ -429,7 +435,7 @@ class SmartSuggestionsCard extends HTMLElement {
     } else if (suggestions.length === 0) {
       bodyHtml = `<div class="empty"><ha-icon icon="mdi:shimmer"></ha-icon>${this._config.empty_message}</div>`;
     } else {
-      const rows = suggestions.map((s, i) => {
+      const makeRow = (s, i) => {
         const icon = this._resolveIcon(s);
         const domain = s.entity_id?.split(".")[0] || "";
         const iconColor = DOMAIN_COLORS[domain] || "#8E8E93";
@@ -461,8 +467,31 @@ class SmartSuggestionsCard extends HTMLElement {
             </div>
           </div>
         `;
-      }).join("");
-      bodyHtml = `<div class="list-wrap">${rows}</div>`;
+      };
+
+      const buckets = { suggested: [], scene: [], stretch: [] };
+      suggestions.forEach((s, i) => {
+        const domain = s.entity_id?.split(".")[0] || "";
+        const key = (s.section && buckets[s.section] !== undefined)
+          ? s.section
+          : domain === "scene" ? "scene" : "suggested";
+        buckets[key].push({ s, i });
+      });
+
+      const sectionDefs = [
+        { key: "suggested", label: "Suggested for You" },
+        { key: "scene",     label: "Scenes" },
+        { key: "stretch",   label: "Worth Trying" },
+      ];
+
+      const sectionsHtml = sectionDefs
+        .filter(({ key }) => buckets[key].length > 0)
+        .map(({ key, label }) => `
+          <div class="section-header">${label}</div>
+          <div class="list-wrap">${buckets[key].map(({ s, i }) => makeRow(s, i)).join("")}</div>
+        `).join("");
+
+      bodyHtml = `<div class="sections">${sectionsHtml}</div>`;
     }
 
     this.shadowRoot.innerHTML = `

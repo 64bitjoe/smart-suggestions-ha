@@ -4,7 +4,7 @@
  * Drop in /config/www/smart-suggestions-card.js
  */
 
-const CARD_VERSION = "1.0.5";
+const CARD_VERSION = "1.0.11";
 
 const DOMAIN_ICONS = {
   light: "mdi:lightbulb",
@@ -401,7 +401,7 @@ class SmartSuggestionsCard extends HTMLElement {
     const headerHtml = this._config.show_title ? `
       <div class="header">
         <div class="header-left">
-          <div class="header-icon"><ha-icon icon="mdi:sparkles"></ha-icon></div>
+          <div class="header-icon"><ha-icon icon="${this._config.icon || 'mdi:sparkles'}"></ha-icon></div>
           <div class="header-text">
             <div class="title">${this._config.title}</div>
             <div class="subtitle">${subtitleHtml}</div>
@@ -529,8 +529,9 @@ class SmartSuggestionsCardEditor extends HTMLElement {
   }
 
   setConfig(config) {
+    if (JSON.stringify(config) === JSON.stringify(this._config)) return;
     this._config = { ...config };
-    this._render();
+    if (Object.keys(this._config).length) this._render();
   }
 
   set hass(hass) {
@@ -582,6 +583,12 @@ class SmartSuggestionsCardEditor extends HTMLElement {
           .value="${c.title !== undefined ? c.title : "Suggested for You"}"
         ></ha-textfield>
 
+        <ha-icon-picker
+          id="icon"
+          label="Header icon"
+          .value="${c.icon || 'mdi:sparkles'}"
+        ></ha-icon-picker>
+
         <div class="toggle-row">
           <span class="toggle-label">Show title</span>
           <ha-switch id="show_title" ?checked="${c.show_title !== false}"></ha-switch>
@@ -627,6 +634,11 @@ class SmartSuggestionsCardEditor extends HTMLElement {
     const titleField = q("title");
     if (titleField) {
       titleField.addEventListener("change", (e) => this._setValue("title", e.target.value));
+    }
+
+    const iconPicker = q("icon");
+    if (iconPicker) {
+      iconPicker.addEventListener("value-changed", (e) => this._setValue("icon", e.detail.value));
     }
 
     const emptyField = q("empty_message");

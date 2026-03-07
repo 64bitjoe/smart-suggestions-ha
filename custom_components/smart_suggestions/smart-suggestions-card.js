@@ -4,7 +4,7 @@
  * Drop in /config/www/smart-suggestions-card.js
  */
 
-const CARD_VERSION = "1.0.3";
+const CARD_VERSION = "1.0.4";
 
 const DOMAIN_ICONS = {
   light: "mdi:lightbulb",
@@ -245,15 +245,11 @@ class SmartSuggestionsCard extends HTMLElement {
     setTimeout(() => row.classList.remove("flash"), 700);
   }
 
-  async _triggerRefresh() {
-    if (!this._hass || this._isRefreshing) return;
+  _triggerRefresh() {
+    if (this._isRefreshing) return;
     this._isRefreshing = true;
     this._render();
-    try {
-      await this._hass.callService("smart_suggestions", "refresh", {});
-    } catch (e) {
-      console.error("[SmartSuggestions] Refresh failed:", e);
-    }
+    // The add-on drives its own refresh cycle — just show a brief spin
     setTimeout(() => {
       this._isRefreshing = false;
       this._render();
@@ -349,13 +345,12 @@ class SmartSuggestionsCard extends HTMLElement {
       .skel-line { height: 10px; border-radius: 5px; background: rgba(255,255,255,0.07); animation: shimmer 1.5s ease-in-out infinite; margin-bottom: 6px; }
       .skel-line:last-child { width: 60%; margin-bottom: 0; }
       @keyframes shimmer { 0%, 100% { opacity: 0.4; } 50% { opacity: 0.7; } }
-      .rank-badge { font-size: 10px; font-weight: 700; color: ${accent}; opacity: 0.5; width: 14px; text-align: center; flex-shrink: 0; }
     `;
 
     const headerHtml = this._config.show_title ? `
       <div class="header">
         <div class="header-left">
-          <div class="header-icon"><ha-icon icon="mdi:brain"></ha-icon></div>
+          <div class="header-icon"><ha-icon icon="mdi:sparkles"></ha-icon></div>
           <div class="header-text">
             <div class="title">${this._config.title}</div>
             ${isUpdating && this._wsConnected
@@ -407,7 +402,7 @@ class SmartSuggestionsCard extends HTMLElement {
         return `
           <div class="row" data-entity="${s.entity_id || ""}" data-index="${i}">
             <div class="row-main" data-action="${i}">
-              <span class="rank-badge">${i + 1}</span>
+
               <div class="icon-wrap">
                 <ha-icon icon="${icon}"></ha-icon>
                 <div class="action-dot" style="background:${actionDotColor}"></div>

@@ -4,7 +4,7 @@
  * Drop in /config/www/smart-suggestions-card.js
  */
 
-const CARD_VERSION = "1.0.14";
+const CARD_VERSION = "1.0.15";
 
 const DOMAIN_ICONS = {
   light: "mdi:lightbulb",
@@ -218,12 +218,24 @@ class SmartSuggestionsCard extends HTMLElement {
   }
 
   _resolveIcon(suggestion) {
-    if (suggestion.icon) return suggestion.icon;
-    if (suggestion.entity_id) {
-      const domain = suggestion.entity_id.split(".")[0];
-      return DOMAIN_ICONS[domain] || "mdi:star-circle";
+    const eid = suggestion.entity_id;
+    const state = eid && this._hass ? this._hass.states[eid] : null;
+    // Prefer custom icon set in HA entity customization
+    if (state?.attributes?.icon) return state.attributes.icon;
+    // Ollama-provided icon — validate it's a real mdi: string (not null/""/garbage)
+    const sugIcon = suggestion.icon;
+    if (sugIcon && typeof sugIcon === "string" && sugIcon.startsWith("mdi:") && sugIcon.length > 5) {
+      return sugIcon;
     }
+    // Domain fallback
+    if (eid) return DOMAIN_ICONS[eid.split(".")[0]] || "mdi:star-circle";
     return "mdi:star-circle";
+  }
+
+  _resolveEntityPicture(suggestion) {
+    const eid = suggestion.entity_id;
+    const pic = eid && this._hass ? this._hass.states[eid]?.attributes?.entity_picture : null;
+    return pic || null;
   }
 
   async _callAction(suggestion) {
@@ -452,6 +464,7 @@ class SmartSuggestionsCard extends HTMLElement {
     } else {
       const makeRow = (s, i) => {
         const icon = this._resolveIcon(s);
+        const picture = this._resolveEntityPicture(s);
         const domain = s.entity_id?.split(".")[0] || "";
         const iconColor = DOMAIN_COLORS[domain] || "#8E8E93";
         const actionLabel = this._getActionLabel(s.action);
@@ -463,11 +476,15 @@ class SmartSuggestionsCard extends HTMLElement {
             subText = `${actionLabel} · ${st.state}`;
           }
         }
+        const iconInner = picture
+          ? `<img src="${picture}" style="width:100%;height:100%;object-fit:cover;border-radius:inherit;">`
+          : `<ha-icon icon="${icon}"></ha-icon>`;
+        const iconBg = picture ? "transparent" : iconColor;
         return `
           <div class="row" data-entity="${s.entity_id || ""}" data-index="${i}">
             <div class="row-main" data-action="${i}">
-              <div class="icon-wrap" data-more-info="${s.entity_id || ""}" style="background:${iconColor}">
-                <ha-icon icon="${icon}"></ha-icon>
+              <div class="icon-wrap" data-more-info="${s.entity_id || ""}" style="background:${iconBg}">
+                ${iconInner}
               </div>
               <div class="row-text">
                 <div class="row-name">${s.name || s.entity_id}</div>

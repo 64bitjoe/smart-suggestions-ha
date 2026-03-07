@@ -289,7 +289,6 @@ class SmartSuggestionsCard extends HTMLElement {
   _toggleExpand(index) {
     this._expandedIndex = this._expandedIndex === index ? null : index;
     this._render();
-    this._attachListeners();
   }
 
   _getActionLabel(action) {

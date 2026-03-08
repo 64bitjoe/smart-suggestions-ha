@@ -4,7 +4,7 @@
  * Drop in /config/www/smart-suggestions-card.js
  */
 
-const CARD_VERSION = "1.0.19";
+const CARD_VERSION = "1.0.20";
 
 const DOMAIN_ICONS = {
   light: "mdi:lightbulb",
@@ -59,23 +59,23 @@ class SmartSuggestionsCard extends HTMLElement {
   }
 
   setConfig(config) {
+    // Spread raw config first, then apply defaults for any missing keys
+    const c = { ...config };
     this._config = {
-      entity: config.entity || "smart_suggestions.suggestions",
-      title: config.title !== undefined ? config.title : "Suggested for You",
-      show_title: config.show_title !== false,
-      show_refresh: config.show_refresh !== false,
-      show_last_updated: config.show_last_updated !== false,
-      accent_color: config.accent_color || null,
-      empty_message: config.empty_message || "Thinking of suggestions…",
-      addon_url: config.addon_url || null,
-      // New options
-      compact: config.compact || false,
-      max_visible: config.max_visible || 0,
-      tap_action: config.tap_action || "execute",
-      show_feedback: config.show_feedback !== false,
-      show_confidence_border: config.show_confidence_border !== false,
-      show_section_headers: config.show_section_headers !== false,
-      ...config,
+      entity:                  c.entity                  ?? "smart_suggestions.suggestions",
+      title:                   c.title                   !== undefined ? c.title : "Suggested for You",
+      show_title:              c.show_title              !== false,
+      show_refresh:            c.show_refresh            !== false,
+      show_last_updated:       c.show_last_updated       !== false,
+      accent_color:            c.accent_color            || null,
+      empty_message:           c.empty_message           || "Thinking of suggestions…",
+      addon_url:               c.addon_url               || null,
+      compact:                 c.compact                 === true,
+      max_visible:             parseInt(c.max_visible)   || 0,
+      tap_action:              c.tap_action              || "execute",
+      show_feedback:           c.show_feedback           !== false,
+      show_confidence_border:  c.show_confidence_border  !== false,
+      show_section_headers:    c.show_section_headers    !== false,
     };
     this._render();
     // Try to connect to the add-on WebSocket if a URL is configured
@@ -387,6 +387,17 @@ class SmartSuggestionsCard extends HTMLElement {
   }
 
   _render() {
+    try {
+      this._renderInner();
+    } catch (e) {
+      console.error("[SmartSuggestions] Render error:", e);
+      this.shadowRoot.innerHTML = `<ha-card style="padding:16px;color:var(--error-color,#f44336)">
+        Smart Suggestions render error — check browser console for details.
+      </ha-card>`;
+    }
+  }
+
+  _renderInner() {
     const accent = this._config.accent_color || "#007AFF";
     const suggestions = this._getSuggestions();
     const status = this._getStatus();
@@ -735,7 +746,10 @@ class SmartSuggestionsCardEditor extends HTMLElement {
       <style>
         .editor { display: flex; flex-direction: column; gap: 16px; padding: 4px 0; }
         .section-title { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.07em; color: var(--secondary-text-color); margin-bottom: -6px; }
-        ha-textfield, ha-icon-picker, ha-select { width: 100%; }
+        ha-textfield, ha-icon-picker { width: 100%; }
+        .native-select-wrap { display:flex; flex-direction:column; gap:4px; }
+        .native-select-label { font-size:12px; color:var(--secondary-text-color); }
+        .native-select { width:100%; background:var(--input-fill-color,rgba(0,0,0,0.06)); color:var(--primary-text-color,#fff); border:1px solid var(--divider-color,rgba(0,0,0,0.12)); border-radius:4px; padding:10px 12px; font-size:14px; outline:none; cursor:pointer; }
         .toggle-row { display: flex; align-items: center; justify-content: space-between; height: 40px; }
         .toggle-label { font-size: 14px; color: var(--primary-text-color); }
         .toggle-hint { font-size: 12px; color: var(--secondary-text-color); margin-top: 1px; }
@@ -787,11 +801,14 @@ class SmartSuggestionsCardEditor extends HTMLElement {
         </div>
 
         <div class="section-title">Behaviour</div>
-        <ha-select id="tap_action" label="Tap action">
-          <mwc-list-item value="execute">Execute (perform the action)</mwc-list-item>
-          <mwc-list-item value="more-info">More info (open entity dialog)</mwc-list-item>
-          <mwc-list-item value="expand">Expand (show reason only)</mwc-list-item>
-        </ha-select>
+        <div class="native-select-wrap">
+          <label class="native-select-label">Tap action</label>
+          <select id="tap_action" class="native-select">
+            <option value="execute">Execute (perform the action)</option>
+            <option value="more-info">More info (open entity dialog)</option>
+            <option value="expand">Expand (show reason only)</option>
+          </select>
+        </div>
         <ha-textfield id="max_visible" label="Max suggestions to show (0 = all)" type="number" min="0" max="20"></ha-textfield>
       </div>
     `;
@@ -835,6 +852,8 @@ class SmartSuggestionsCardEditor extends HTMLElement {
 
     const tapAction = q("tap_action");
     if (tapAction && !this._hasFocus(tapAction)) tapAction.value = c.tap_action || "execute";
+    // Ensure the option exists before setting (native select silently ignores unknown values)
+
 
     const maxVisible = q("max_visible");
     if (maxVisible && !this._hasFocus(maxVisible)) maxVisible.value = c.max_visible ?? 0;
@@ -860,7 +879,7 @@ class SmartSuggestionsCardEditor extends HTMLElement {
       this._syncFields();
     });
 
-    q("tap_action")?.addEventListener("value-changed", (e) => this._setValue("tap_action", e.detail.value));
+    q("tap_action")?.addEventListener("change", (e) => this._setValue("tap_action", e.target.value));
 
     q("max_visible")?.addEventListener("input", (e) => {
       const v = parseInt(e.target.value);

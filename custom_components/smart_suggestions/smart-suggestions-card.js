@@ -4,7 +4,7 @@
  * Drop in /config/www/smart-suggestions-card.js
  */
 
-const CARD_VERSION = "1.0.17";
+const CARD_VERSION = "1.0.18";
 
 const DOMAIN_ICONS = {
   light: "mdi:lightbulb",
@@ -318,6 +318,26 @@ class SmartSuggestionsCard extends HTMLElement {
     this._render();
   }
 
+  async _sendFeedback(entityId, vote) {
+    const btn = this.shadowRoot.querySelector(
+      `[data-feedback-eid="${CSS.escape(entityId)}"][data-vote="${vote}"]`
+    );
+    if (btn) {
+      btn.classList.add("pop", vote === "up" ? "voted-up" : "voted-down");
+      setTimeout(() => btn.classList.remove("pop"), 300);
+    }
+    const base = this._config.addon_url
+      ? this._config.addon_url.replace(/\/$/, "")
+      : `/api/hassio_ingress/smart_suggestions`;
+    try {
+      await fetch(`${base}/feedback`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ entity_id: entityId, vote }),
+      });
+    } catch (e) { console.warn("[SmartSuggestions] Feedback failed:", e); }
+  }
+
   _getActionLabel(action) {
     const map = {
       turn_on: "Turn On",
@@ -410,6 +430,15 @@ class SmartSuggestionsCard extends HTMLElement {
       .row.flash .row-main { animation: flash-row 0.6s ease; }
       @keyframes flash-row { 0% { background: rgba(52,199,89,0); } 25% { background: rgba(52,199,89,0.14); } 100% { background: rgba(52,199,89,0); } }
 
+      /* ── Vote buttons ── */
+      .feedback-area { display:flex; gap:2px; align-items:center; flex-shrink:0; }
+      .vote-btn { width:28px; height:28px; border-radius:50%; background:none; border:none; cursor:pointer; display:flex; align-items:center; justify-content:center; color:var(--secondary-text-color,#8E8E93); opacity:0.5; transition:opacity 0.15s,color 0.15s; -webkit-tap-highlight-color:transparent; }
+      .vote-btn ha-icon { --mdc-icon-size:15px; }
+      .vote-btn.voted-up { color:#34C759; opacity:1; }
+      .vote-btn.voted-down { color:#FF3B30; opacity:1; }
+      @keyframes vote-pop { 0%{transform:scale(1)} 40%{transform:scale(1.4)} 100%{transform:scale(1)} }
+      .vote-btn.pop { animation:vote-pop 0.25s ease; }
+
       /* ── Empty ── */
       .empty { padding: 36px 20px; text-align: center; color: var(--secondary-text-color, #8E8E93); font-size: 14px; }
       .empty ha-icon { --mdc-icon-size: 38px; display: block; margin: 0 auto 10px; opacity: 0.22; }
@@ -480,15 +509,28 @@ class SmartSuggestionsCard extends HTMLElement {
           ? `<img src="${picture}" style="width:100%;height:100%;object-fit:cover;border-radius:inherit;">`
           : `<ha-icon icon="${icon}"></ha-icon>`;
         const iconBg = picture ? "transparent" : iconColor;
+        // Confidence left-border from score
+        const score = s.score ?? 50;
+        const bColor = score >= 70 ? "#34C759" : score >= 40 ? "#FF9F0A" : "#8E8E93";
+        const bOpacity = Math.round((score / 100) * 0.45 * 255).toString(16).padStart(2, "0");
+        const borderStyle = `border-left:3px solid ${bColor}${bOpacity};padding-left:11px;`;
         return `
           <div class="row" data-entity="${s.entity_id || ""}" data-index="${i}">
-            <div class="row-main" data-action="${i}">
+            <div class="row-main" data-action="${i}" style="${borderStyle}">
               <div class="icon-wrap" data-more-info="${s.entity_id || ""}" style="background:${iconBg}">
                 ${iconInner}
               </div>
               <div class="row-text">
                 <div class="row-name">${s.name || s.entity_id}</div>
                 <div class="row-sub">${subText}</div>
+              </div>
+              <div class="feedback-area">
+                <button class="vote-btn" data-feedback-eid="${s.entity_id || ""}" data-vote="up" title="More like this">
+                  <ha-icon icon="mdi:thumb-up-outline"></ha-icon>
+                </button>
+                <button class="vote-btn" data-feedback-eid="${s.entity_id || ""}" data-vote="down" title="Less like this">
+                  <ha-icon icon="mdi:thumb-down-outline"></ha-icon>
+                </button>
               </div>
               <button class="info-btn ${isExpanded ? "active" : ""}" data-info="${i}">
                 <ha-icon icon="mdi:information-outline"></ha-icon>
@@ -538,13 +580,20 @@ class SmartSuggestionsCard extends HTMLElement {
     if (refreshBtn) {
       refreshBtn.addEventListener("click", (e) => { e.stopPropagation(); this._triggerRefresh(); });
     }
-    // Row tap → execute action (skip if icon or info button was the target)
+    // Row tap → execute action (skip if icon, info button, or vote button was the target)
     this.shadowRoot.querySelectorAll("[data-action]").forEach((el) => {
       el.addEventListener("click", (e) => {
-        if (e.target.closest("[data-info]") || e.target.closest("[data-more-info]")) return;
+        if (e.target.closest("[data-info]") || e.target.closest("[data-more-info]") || e.target.closest("[data-feedback-eid]")) return;
         const index = parseInt(el.dataset.action);
         const suggestions = this._getSuggestions();
         if (suggestions[index]) this._callAction(suggestions[index]);
+      });
+    });
+    // Vote buttons
+    this.shadowRoot.querySelectorAll("[data-feedback-eid]").forEach((btn) => {
+      btn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        this._sendFeedback(btn.dataset.feedbackEid, btn.dataset.vote);
       });
     });
     // Icon tap / long press → more-info popup

@@ -4,7 +4,7 @@
  * Drop in /config/www/smart-suggestions-card.js
  */
 
-const CARD_VERSION = "1.0.18";
+const CARD_VERSION = "1.0.19";
 
 const DOMAIN_ICONS = {
   light: "mdi:lightbulb",
@@ -68,6 +68,13 @@ class SmartSuggestionsCard extends HTMLElement {
       accent_color: config.accent_color || null,
       empty_message: config.empty_message || "Thinking of suggestions…",
       addon_url: config.addon_url || null,
+      // New options
+      compact: config.compact || false,
+      max_visible: config.max_visible || 0,
+      tap_action: config.tap_action || "execute",
+      show_feedback: config.show_feedback !== false,
+      show_confidence_border: config.show_confidence_border !== false,
+      show_section_headers: config.show_section_headers !== false,
       ...config,
     };
     this._render();
@@ -182,15 +189,19 @@ class SmartSuggestionsCard extends HTMLElement {
 
   _getSuggestions() {
     // Prefer live suggestions pushed from add-on WebSocket
+    let suggestions;
     if (this._wsConnected && Array.isArray(this._streamingSuggestions) && this._streamingSuggestions.length) {
-      return this._streamingSuggestions;
+      suggestions = this._streamingSuggestions;
+    } else {
+      // Fallback: read from HA state (works without the add-on)
+      if (!this._hass) return [];
+      const state = this._hass.states[this._config.entity];
+      if (!state) return [];
+      const s = state.attributes.suggestions;
+      suggestions = Array.isArray(s) ? s : [];
     }
-    // Fallback: read from HA state (works without the add-on)
-    if (!this._hass) return [];
-    const state = this._hass.states[this._config.entity];
-    if (!state) return [];
-    const s = state.attributes.suggestions;
-    return Array.isArray(s) ? s : [];
+    const max = this._config.max_visible;
+    return max > 0 ? suggestions.slice(0, max) : suggestions;
   }
 
   _getStatus() {
@@ -220,14 +231,29 @@ class SmartSuggestionsCard extends HTMLElement {
   _resolveIcon(suggestion) {
     const eid = suggestion.entity_id;
     const state = eid && this._hass ? this._hass.states[eid] : null;
-    // Prefer custom icon set in HA entity customization
+    // 1. Custom icon set in HA entity registry / customization
     if (state?.attributes?.icon) return state.attributes.icon;
-    // Ollama-provided icon — validate it's a real mdi: string (not null/""/garbage)
+    // 2. Ollama-provided icon — validate it's a real mdi: string
     const sugIcon = suggestion.icon;
     if (sugIcon && typeof sugIcon === "string" && sugIcon.startsWith("mdi:") && sugIcon.length > 5) {
       return sugIcon;
     }
-    // Domain fallback
+    // 3. State-based icons for common entities
+    if (state && eid) {
+      const domain = eid.split(".")[0];
+      const s = state.state;
+      if (domain === "light")        return s === "on" ? "mdi:lightbulb" : "mdi:lightbulb-outline";
+      if (domain === "switch")       return s === "on" ? "mdi:toggle-switch" : "mdi:toggle-switch-off-outline";
+      if (domain === "cover") {
+        const pos = state.attributes?.current_position;
+        return pos > 0 ? "mdi:window-shutter-open" : "mdi:window-shutter";
+      }
+      if (domain === "media_player") return s === "playing" ? "mdi:cast-connected" : "mdi:cast";
+      if (domain === "lock")         return s === "locked" ? "mdi:lock" : "mdi:lock-open";
+      if (domain === "fan")          return s === "on" ? "mdi:fan" : "mdi:fan-off";
+      if (domain === "vacuum")       return s === "cleaning" ? "mdi:robot-vacuum" : "mdi:robot-vacuum-variant";
+    }
+    // 4. Domain fallback
     if (eid) return DOMAIN_ICONS[eid.split(".")[0]] || "mdi:star-circle";
     return "mdi:star-circle";
   }
@@ -430,6 +456,13 @@ class SmartSuggestionsCard extends HTMLElement {
       .row.flash .row-main { animation: flash-row 0.6s ease; }
       @keyframes flash-row { 0% { background: rgba(52,199,89,0); } 25% { background: rgba(52,199,89,0.14); } 100% { background: rgba(52,199,89,0); } }
 
+      /* ── Compact mode ── */
+      .row-main.compact { padding: 6px 10px 6px 12px; min-height: 44px; gap: 10px; }
+      .row-main.compact .icon-wrap { width: 30px; height: 30px; border-radius: 8px; }
+      .row-main.compact .icon-wrap ha-icon { --mdc-icon-size: 17px; }
+      .row-main.compact .row-name { font-size: 13.5px; }
+      .row-main.compact .row-sub { font-size: 11px; }
+
       /* ── Vote buttons ── */
       .feedback-area { display:flex; gap:2px; align-items:center; flex-shrink:0; }
       .vote-btn { width:28px; height:28px; border-radius:50%; background:none; border:none; cursor:pointer; display:flex; align-items:center; justify-content:center; color:var(--secondary-text-color,#8E8E93); opacity:0.5; transition:opacity 0.15s,color 0.15s; -webkit-tap-highlight-color:transparent; }
@@ -511,19 +544,14 @@ class SmartSuggestionsCard extends HTMLElement {
         const iconBg = picture ? "transparent" : iconColor;
         // Confidence left-border from score
         const score = s.score ?? 50;
-        const bColor = score >= 70 ? "#34C759" : score >= 40 ? "#FF9F0A" : "#8E8E93";
-        const bOpacity = Math.round((score / 100) * 0.45 * 255).toString(16).padStart(2, "0");
-        const borderStyle = `border-left:3px solid ${bColor}${bOpacity};padding-left:11px;`;
-        return `
-          <div class="row" data-entity="${s.entity_id || ""}" data-index="${i}">
-            <div class="row-main" data-action="${i}" style="${borderStyle}">
-              <div class="icon-wrap" data-more-info="${s.entity_id || ""}" style="background:${iconBg}">
-                ${iconInner}
-              </div>
-              <div class="row-text">
-                <div class="row-name">${s.name || s.entity_id}</div>
-                <div class="row-sub">${subText}</div>
-              </div>
+        let borderStyle = "";
+        if (this._config.show_confidence_border) {
+          const bColor = score >= 70 ? "#34C759" : score >= 40 ? "#FF9F0A" : "#8E8E93";
+          const bOpacity = Math.round((score / 100) * 0.45 * 255).toString(16).padStart(2, "0");
+          borderStyle = `border-left:3px solid ${bColor}${bOpacity};padding-left:11px;`;
+        }
+        const compactClass = this._config.compact ? " compact" : "";
+        const feedbackHtml = this._config.show_feedback ? `
               <div class="feedback-area">
                 <button class="vote-btn" data-feedback-eid="${s.entity_id || ""}" data-vote="up" title="More like this">
                   <ha-icon icon="mdi:thumb-up-outline"></ha-icon>
@@ -531,7 +559,18 @@ class SmartSuggestionsCard extends HTMLElement {
                 <button class="vote-btn" data-feedback-eid="${s.entity_id || ""}" data-vote="down" title="Less like this">
                   <ha-icon icon="mdi:thumb-down-outline"></ha-icon>
                 </button>
+              </div>` : "";
+        return `
+          <div class="row" data-entity="${s.entity_id || ""}" data-index="${i}">
+            <div class="row-main${compactClass}" data-action="${i}" style="${borderStyle}">
+              <div class="icon-wrap" data-more-info="${s.entity_id || ""}" style="background:${iconBg}">
+                ${iconInner}
               </div>
+              <div class="row-text">
+                <div class="row-name">${s.name || s.entity_id}</div>
+                <div class="row-sub">${subText}</div>
+              </div>
+              ${feedbackHtml}
               <button class="info-btn ${isExpanded ? "active" : ""}" data-info="${i}">
                 <ha-icon icon="mdi:information-outline"></ha-icon>
               </button>
@@ -561,7 +600,7 @@ class SmartSuggestionsCard extends HTMLElement {
       const sectionsHtml = sectionDefs
         .filter(({ key }) => buckets[key].length > 0)
         .map(({ key, label }) => `
-          <div class="section-header">${label}</div>
+          ${this._config.show_section_headers ? `<div class="section-header">${label}</div>` : ""}
           <div class="list-wrap">${buckets[key].map(({ s, i }) => makeRow(s, i)).join("")}</div>
         `).join("");
 
@@ -580,13 +619,22 @@ class SmartSuggestionsCard extends HTMLElement {
     if (refreshBtn) {
       refreshBtn.addEventListener("click", (e) => { e.stopPropagation(); this._triggerRefresh(); });
     }
-    // Row tap → execute action (skip if icon, info button, or vote button was the target)
+    // Row tap — behaviour controlled by tap_action config
     this.shadowRoot.querySelectorAll("[data-action]").forEach((el) => {
       el.addEventListener("click", (e) => {
         if (e.target.closest("[data-info]") || e.target.closest("[data-more-info]") || e.target.closest("[data-feedback-eid]")) return;
         const index = parseInt(el.dataset.action);
         const suggestions = this._getSuggestions();
-        if (suggestions[index]) this._callAction(suggestions[index]);
+        const s = suggestions[index];
+        if (!s) return;
+        const action = this._config.tap_action;
+        if (action === "more-info") {
+          if (s.entity_id) this._showMoreInfo(s.entity_id);
+        } else if (action === "expand") {
+          this._toggleExpand(index);
+        } else {
+          this._callAction(s);
+        }
       });
     });
     // Vote buttons
@@ -687,9 +735,10 @@ class SmartSuggestionsCardEditor extends HTMLElement {
       <style>
         .editor { display: flex; flex-direction: column; gap: 16px; padding: 4px 0; }
         .section-title { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.07em; color: var(--secondary-text-color); margin-bottom: -6px; }
-        ha-textfield, ha-icon-picker { width: 100%; }
+        ha-textfield, ha-icon-picker, ha-select { width: 100%; }
         .toggle-row { display: flex; align-items: center; justify-content: space-between; height: 40px; }
         .toggle-label { font-size: 14px; color: var(--primary-text-color); }
+        .toggle-hint { font-size: 12px; color: var(--secondary-text-color); margin-top: 1px; }
         .color-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
         .color-row label { font-size: 14px; color: var(--primary-text-color); flex: 1; }
         .color-row input[type="color"] { width: 44px; height: 32px; border: 1px solid var(--divider-color); border-radius: 8px; padding: 2px; cursor: pointer; background: none; }
@@ -698,11 +747,12 @@ class SmartSuggestionsCardEditor extends HTMLElement {
       <div class="editor">
         <div class="section-title">Data</div>
         <ha-entity-picker id="entity" label="Suggestions entity" allow-custom-entity></ha-entity-picker>
+
         <div class="section-title">Display</div>
         <ha-textfield id="title" label="Card title"></ha-textfield>
         <ha-icon-picker id="icon" label="Header icon"></ha-icon-picker>
         <div class="toggle-row">
-          <span class="toggle-label">Show title</span>
+          <span class="toggle-label">Show title bar</span>
           <ha-switch id="show_title"></ha-switch>
         </div>
         <div class="toggle-row">
@@ -713,12 +763,36 @@ class SmartSuggestionsCardEditor extends HTMLElement {
           <span class="toggle-label">Show last updated time</span>
           <ha-switch id="show_last_updated"></ha-switch>
         </div>
+        <div class="toggle-row">
+          <span class="toggle-label">Show section headers</span>
+          <ha-switch id="show_section_headers"></ha-switch>
+        </div>
+        <div class="toggle-row">
+          <span class="toggle-label">Show feedback buttons</span>
+          <ha-switch id="show_feedback"></ha-switch>
+        </div>
+        <div class="toggle-row">
+          <span class="toggle-label">Show confidence border</span>
+          <ha-switch id="show_confidence_border"></ha-switch>
+        </div>
+        <div class="toggle-row">
+          <span class="toggle-label">Compact rows</span>
+          <ha-switch id="compact"></ha-switch>
+        </div>
         <ha-textfield id="empty_message" label="Empty state message"></ha-textfield>
         <div class="color-row">
           <label>Accent colour</label>
           <input type="color" id="accent_color">
           <span class="color-clear" id="color-clear">Reset</span>
         </div>
+
+        <div class="section-title">Behaviour</div>
+        <ha-select id="tap_action" label="Tap action">
+          <mwc-list-item value="execute">Execute (perform the action)</mwc-list-item>
+          <mwc-list-item value="more-info">More info (open entity dialog)</mwc-list-item>
+          <mwc-list-item value="expand">Expand (show reason only)</mwc-list-item>
+        </ha-select>
+        <ha-textfield id="max_visible" label="Max suggestions to show (0 = all)" type="number" min="0" max="20"></ha-textfield>
       </div>
     `;
   }
@@ -749,13 +823,21 @@ class SmartSuggestionsCardEditor extends HTMLElement {
       empty.value = c.empty_message || "Thinking of suggestions…";
     }
 
-    for (const key of ["show_title", "show_refresh", "show_last_updated"]) {
+    for (const key of ["show_title", "show_refresh", "show_last_updated", "show_section_headers", "show_feedback", "show_confidence_border"]) {
       const el = q(key);
       if (el) el.checked = c[key] !== false;
     }
+    const compact = q("compact");
+    if (compact) compact.checked = c.compact === true;
 
     const color = q("accent_color");
     if (color) color.value = c.accent_color || "#3b82f6";
+
+    const tapAction = q("tap_action");
+    if (tapAction && !this._hasFocus(tapAction)) tapAction.value = c.tap_action || "execute";
+
+    const maxVisible = q("max_visible");
+    if (maxVisible && !this._hasFocus(maxVisible)) maxVisible.value = c.max_visible ?? 0;
   }
 
   _attachListeners() {
@@ -766,7 +848,7 @@ class SmartSuggestionsCardEditor extends HTMLElement {
     q("icon")?.addEventListener("value-changed", (e) => this._setValue("icon", e.detail.value));
     q("empty_message")?.addEventListener("input", (e) => this._setValue("empty_message", e.target.value));
 
-    for (const key of ["show_title", "show_refresh", "show_last_updated"]) {
+    for (const key of ["show_title", "show_refresh", "show_last_updated", "show_section_headers", "show_feedback", "show_confidence_border", "compact"]) {
       q(key)?.addEventListener("change", (e) => this._setValue(key, e.target.checked));
     }
 
@@ -776,6 +858,13 @@ class SmartSuggestionsCardEditor extends HTMLElement {
       delete this._config.accent_color;
       this._fire(this._config);
       this._syncFields();
+    });
+
+    q("tap_action")?.addEventListener("value-changed", (e) => this._setValue("tap_action", e.detail.value));
+
+    q("max_visible")?.addEventListener("input", (e) => {
+      const v = parseInt(e.target.value);
+      this._setValue("max_visible", isNaN(v) ? 0 : Math.max(0, v));
     });
   }
 }

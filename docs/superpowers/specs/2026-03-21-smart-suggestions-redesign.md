@@ -245,7 +245,7 @@ On-demand (automation path):
   User clicks "Save as Automation"
     → WSServer receives save_automation message
     → AutomationBuilder.build(suggestion.automation_context)
-    → HAClient.create_automation(config_dict)  [WebSocket API]
+    → HAClient.create_automation(config_dict)  [REST — Supervisor API]
     → WSServer.send(automation_result)
     → Card shows confirmation or raw YAML fallback
 ```

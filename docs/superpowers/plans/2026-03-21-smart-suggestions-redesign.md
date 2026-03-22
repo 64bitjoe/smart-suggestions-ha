@@ -948,8 +948,9 @@ def _routine_matches_now(routine: dict, now: datetime) -> tuple[bool, float]:
 
 
 class StatisticalEngine:
-    def __init__(self, pattern_store: "PatternStore") -> None:
+    def __init__(self, pattern_store: "PatternStore", confidence_threshold: float = 0.6) -> None:
         self._store = pattern_store
+        self._confidence_threshold = confidence_threshold
 
     def score_realtime(self, states: dict) -> list[dict]:
         """Score all actionable entities. Scenes first. Returns sorted candidate list."""
@@ -1022,7 +1023,7 @@ class StatisticalEngine:
                         domain == "scene"
                         and routine_match
                         and eid in routines_by_eid
-                        and routines_by_eid[eid].get("confidence", 0) >= 0.6
+                        and routines_by_eid[eid].get("confidence", 0) >= self._confidence_threshold
                     ),
                     "automation_context": (
                         {
@@ -1838,8 +1839,9 @@ def _confidence_label(score: float, routine_match: bool) -> str:
 
 
 class SceneEngine:
-    def __init__(self, max_suggestions: int = 7) -> None:
+    def __init__(self, max_suggestions: int = 7, confidence_threshold: float = 0.6) -> None:
         self._max = max_suggestions
+        self._confidence_threshold = confidence_threshold
 
     def rank(self, candidates: list[dict], states: dict, feedback: dict) -> list[dict]:
         """Apply feedback + noop filter, sort scenes first, return top N."""
@@ -2531,9 +2533,13 @@ class SmartSuggestionsAddon:
         self._opts = opts
         self._ws_server = WSServer()
         self._pattern_store = PatternStore()
-        self._stat_engine = StatisticalEngine(self._pattern_store)
+        self._stat_engine = StatisticalEngine(
+            self._pattern_store,
+            confidence_threshold=float(opts.get("pattern_confidence_threshold", 0.6)),
+        )
         self._scene_engine = SceneEngine(
             max_suggestions=int(opts.get("max_suggestions", 7)),
+            confidence_threshold=float(opts.get("pattern_confidence_threshold", 0.6)),
         )
         self._narrator = OllamaNarrator(
             ollama_url=opts.get("ollama_url", "http://localhost:11434"),

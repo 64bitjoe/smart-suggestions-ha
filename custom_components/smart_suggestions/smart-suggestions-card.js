@@ -4,7 +4,7 @@
  * Drop in /config/www/smart-suggestions-card.js
  */
 
-const CARD_VERSION = "1.0.20";
+const CARD_VERSION = "1.1.0";
 
 const DOMAIN_ICONS = {
   light: "mdi:lightbulb",
@@ -48,14 +48,14 @@ class SmartSuggestionsCard extends HTMLElement {
     this._expandedIndex = null;
     this._isRefreshing = false;
     this._lastStateStr = null;
-    // Streaming / add-on WebSocket state
+    // Add-on WebSocket state
     this._ws = null;
     this._wsConnected = false;
-    this._streamingBuffer = "";
-    this._streamingSuggestions = [];
+    this._wsSuggestions = [];
     this._wsRetryTimeout = null;
     this._wsEnabled = false;
     this._wsRetryDelay = 5000;
+    this._pendingAutomation = false;
   }
 
   setConfig(config) {
@@ -74,7 +74,6 @@ class SmartSuggestionsCard extends HTMLElement {
       max_visible:             parseInt(c.max_visible)   || 0,
       tap_action:              c.tap_action              || "execute",
       show_feedback:           c.show_feedback           !== false,
-      show_confidence_border:  c.show_confidence_border  !== false,
       show_section_headers:    c.show_section_headers    !== false,
     };
     this._render();
@@ -148,20 +147,10 @@ class SmartSuggestionsCard extends HTMLElement {
 
   _handleWsMessage(msg) {
     switch (msg.type) {
-      case "streaming": {
-        this._streamingBuffer += (msg.token || "");
-        // Show streaming state in the card header
-        if (!this._isRefreshing) {
-          this._isRefreshing = true;
-          this._render();
-        }
-        break;
-      }
       case "suggestions": {
-        this._streamingBuffer = "";
         this._isRefreshing = false;
         // Directly inject suggestions — bypasses HA state polling
-        this._streamingSuggestions = Array.isArray(msg.data) ? msg.data : [];
+        this._wsSuggestions = Array.isArray(msg.data) ? msg.data : [];
         this._render();
         break;
       }
@@ -169,9 +158,19 @@ class SmartSuggestionsCard extends HTMLElement {
         const isUpdating = msg.state === "updating";
         if (isUpdating !== this._isRefreshing) {
           this._isRefreshing = isUpdating;
-          if (!isUpdating) this._streamingBuffer = "";
           this._render();
         }
+        break;
+      }
+      case "automation_result": {
+        this._pendingAutomation = false;
+        if (msg.success) {
+          this._showToast("Automation created!");
+        } else {
+          this._showYamlFallback(msg.yaml || "", msg.error || "Unknown error");
+        }
+        // Re-render to re-enable Save as Automation buttons
+        this._render();
         break;
       }
     }
@@ -190,8 +189,8 @@ class SmartSuggestionsCard extends HTMLElement {
   _getSuggestions() {
     // Prefer live suggestions pushed from add-on WebSocket
     let suggestions;
-    if (this._wsConnected && Array.isArray(this._streamingSuggestions) && this._streamingSuggestions.length) {
-      suggestions = this._streamingSuggestions;
+    if (this._wsConnected && Array.isArray(this._wsSuggestions) && this._wsSuggestions.length) {
+      suggestions = this._wsSuggestions;
     } else {
       // Fallback: read from HA state (works without the add-on)
       if (!this._hass) return [];
@@ -344,6 +343,61 @@ class SmartSuggestionsCard extends HTMLElement {
     this._render();
   }
 
+  _showToast(message) {
+    // Remove any existing toast
+    const existing = this.shadowRoot.querySelector(".toast");
+    if (existing) existing.remove();
+    const toast = document.createElement("div");
+    toast.className = "toast";
+    toast.textContent = message;
+    // Append to shadow root host level so it overlays the card
+    this.shadowRoot.appendChild(toast);
+    setTimeout(() => {
+      toast.style.transition = "opacity 0.3s";
+      toast.style.opacity = "0";
+      setTimeout(() => toast.remove(), 320);
+    }, 3000);
+  }
+
+  _showYamlFallback(yaml, error) {
+    // Remove any existing modal
+    const existing = this.shadowRoot.querySelector(".yaml-overlay");
+    if (existing) existing.remove();
+
+    const overlay = document.createElement("div");
+    overlay.className = "yaml-overlay";
+    overlay.innerHTML = `
+      <div class="yaml-drawer">
+        <div class="yaml-header">
+          <span class="yaml-title">Save as Automation</span>
+          <button class="yaml-close" id="yaml-close-btn">&times;</button>
+        </div>
+        <div class="yaml-error">${this._escapeHtml(error)}</div>
+        <pre class="yaml-pre">${this._escapeHtml(yaml)}</pre>
+        <button class="yaml-copy-btn" id="yaml-copy-btn">Copy YAML</button>
+      </div>
+    `;
+    this.shadowRoot.appendChild(overlay);
+
+    overlay.querySelector("#yaml-close-btn").addEventListener("click", () => overlay.remove());
+    overlay.addEventListener("click", (e) => { if (e.target === overlay) overlay.remove(); });
+    overlay.querySelector("#yaml-copy-btn").addEventListener("click", () => {
+      navigator.clipboard.writeText(yaml).then(() => {
+        const btn = overlay.querySelector("#yaml-copy-btn");
+        btn.textContent = "Copied!";
+        setTimeout(() => { btn.textContent = "Copy YAML"; }, 2000);
+      }).catch(() => {});
+    });
+  }
+
+  _escapeHtml(str) {
+    return String(str)
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;");
+  }
+
   async _sendFeedback(entityId, vote) {
     const btn = this.shadowRoot.querySelector(
       `[data-feedback-eid="${CSS.escape(entityId)}"][data-vote="${vote}"]`
@@ -474,6 +528,21 @@ class SmartSuggestionsCard extends HTMLElement {
       .row-main.compact .row-name { font-size: 13.5px; }
       .row-main.compact .row-sub { font-size: 11px; }
 
+      /* ── Confidence label ── */
+      .confidence-label { display:inline-block; font-size:10px; font-weight:600; text-transform:uppercase; letter-spacing:0.05em; padding:1px 6px; border-radius:20px; background:rgba(255,255,255,0.08); color:var(--secondary-text-color,#8E8E93); margin-top:2px; white-space:nowrap; }
+      .confidence-label.high { background:rgba(52,199,89,0.15); color:#34C759; }
+      .confidence-label.medium { background:rgba(255,159,10,0.15); color:#FF9F0A; }
+      .confidence-label.low { background:rgba(142,142,147,0.12); color:#8E8E93; }
+
+      /* ── Scene cards ── */
+      .scene-list-wrap { border-radius: 12px; overflow: hidden; background: rgba(191,90,242,0.10); border: 1px solid rgba(191,90,242,0.22); margin-bottom: 10px; }
+      .scene-list-wrap .row-main { padding: 12px 12px 12px 14px; min-height: 62px; }
+      .scene-list-wrap .row-name { font-size: 15.5px; font-weight: 500; }
+      .save-automation-btn { display:flex; align-items:center; gap:4px; margin:0 14px 12px 62px; padding:7px 14px; background:rgba(191,90,242,0.18); border:1px solid rgba(191,90,242,0.35); border-radius:9px; color:#BF5AF2; font-size:13px; font-weight:600; cursor:pointer; -webkit-tap-highlight-color:transparent; transition:background 0.15s,opacity 0.15s; width:fit-content; }
+      .save-automation-btn ha-icon { --mdc-icon-size:15px; }
+      .save-automation-btn:active { background:rgba(191,90,242,0.28); }
+      .save-automation-btn:disabled { opacity:0.45; cursor:default; }
+
       /* ── Vote buttons ── */
       .feedback-area { display:flex; gap:2px; align-items:center; flex-shrink:0; }
       .vote-btn { width:28px; height:28px; border-radius:50%; background:none; border:none; cursor:pointer; display:flex; align-items:center; justify-content:center; color:var(--secondary-text-color,#8E8E93); opacity:0.5; transition:opacity 0.15s,color 0.15s; -webkit-tap-highlight-color:transparent; }
@@ -482,6 +551,21 @@ class SmartSuggestionsCard extends HTMLElement {
       .vote-btn.voted-down { color:#FF3B30; opacity:1; }
       @keyframes vote-pop { 0%{transform:scale(1)} 40%{transform:scale(1.4)} 100%{transform:scale(1)} }
       .vote-btn.pop { animation:vote-pop 0.25s ease; }
+
+      /* ── Toast ── */
+      .toast { position:fixed; bottom:32px; left:50%; transform:translateX(-50%) translateY(0); background:rgba(30,30,32,0.95); color:#fff; font-size:14px; font-weight:500; padding:10px 20px; border-radius:24px; box-shadow:0 4px 20px rgba(0,0,0,0.45); z-index:9999; pointer-events:none; animation:toast-in 0.22s ease; }
+      @keyframes toast-in { from { opacity:0; transform:translateX(-50%) translateY(8px); } to { opacity:1; transform:translateX(-50%) translateY(0); } }
+
+      /* ── YAML modal ── */
+      .yaml-overlay { position:fixed; inset:0; background:rgba(0,0,0,0.65); z-index:9998; display:flex; align-items:flex-end; justify-content:center; }
+      .yaml-drawer { background:#1C1C1E; border-radius:20px 20px 0 0; width:100%; max-width:600px; padding:20px 18px 32px; box-shadow:0 -4px 40px rgba(0,0,0,0.5); }
+      .yaml-header { display:flex; align-items:center; justify-content:space-between; margin-bottom:12px; }
+      .yaml-title { font-size:16px; font-weight:700; color:var(--primary-text-color,#fff); }
+      .yaml-close { background:none; border:none; color:var(--secondary-text-color,#8E8E93); cursor:pointer; font-size:22px; line-height:1; padding:0 2px; }
+      .yaml-error { font-size:12px; color:#FF3B30; margin-bottom:10px; }
+      .yaml-pre { background:rgba(255,255,255,0.06); border-radius:10px; padding:12px; overflow:auto; max-height:260px; font-size:12px; font-family:ui-monospace,monospace; color:#e2e8f0; white-space:pre; }
+      .yaml-copy-btn { margin-top:12px; width:100%; padding:11px; background:rgba(255,255,255,0.09); border:1px solid rgba(255,255,255,0.13); border-radius:10px; color:var(--primary-text-color,#fff); font-size:14px; font-weight:600; cursor:pointer; }
+      .yaml-copy-btn:active { background:rgba(255,255,255,0.16); }
 
       /* ── Empty ── */
       .empty { padding: 36px 20px; text-align: center; color: var(--secondary-text-color, #8E8E93); font-size: 14px; }
@@ -535,11 +619,22 @@ class SmartSuggestionsCard extends HTMLElement {
     } else if (suggestions.length === 0) {
       bodyHtml = `<div class="empty"><ha-icon icon="mdi:shimmer"></ha-icon>${this._config.empty_message}</div>`;
     } else {
-      const makeRow = (s, i) => {
+      // Confidence label helper
+      const confidenceLabel = (s) => {
+        const score = s.score ?? 50;
+        const conf = s.confidence;
+        let level, text;
+        if (conf === "high" || score >= 70) { level = "high"; text = "High confidence"; }
+        else if (conf === "medium" || score >= 40) { level = "medium"; text = "Pattern match"; }
+        else { level = "low"; text = "Contextual"; }
+        return `<span class="confidence-label ${level}">${text}</span>`;
+      };
+
+      const makeRow = (s, i, isScene) => {
         const icon = this._resolveIcon(s);
         const picture = this._resolveEntityPicture(s);
         const domain = s.entity_id?.split(".")[0] || "";
-        const iconColor = DOMAIN_COLORS[domain] || "#8E8E93";
+        const iconColor = isScene ? DOMAIN_COLORS["scene"] : (DOMAIN_COLORS[domain] || "#8E8E93");
         const actionLabel = this._getActionLabel(s.action);
         const isExpanded = this._expandedIndex === i;
         let subText = actionLabel;
@@ -553,14 +648,6 @@ class SmartSuggestionsCard extends HTMLElement {
           ? `<img src="${picture}" style="width:100%;height:100%;object-fit:cover;border-radius:inherit;">`
           : `<ha-icon icon="${icon}"></ha-icon>`;
         const iconBg = picture ? "transparent" : iconColor;
-        // Confidence left-border from score
-        const score = s.score ?? 50;
-        let borderStyle = "";
-        if (this._config.show_confidence_border) {
-          const bColor = score >= 70 ? "#34C759" : score >= 40 ? "#FF9F0A" : "#8E8E93";
-          const bOpacity = Math.round((score / 100) * 0.45 * 255).toString(16).padStart(2, "0");
-          borderStyle = `border-left:3px solid ${bColor}${bOpacity};padding-left:11px;`;
-        }
         const compactClass = this._config.compact ? " compact" : "";
         const feedbackHtml = this._config.show_feedback ? `
               <div class="feedback-area">
@@ -571,21 +658,29 @@ class SmartSuggestionsCard extends HTMLElement {
                   <ha-icon icon="mdi:thumb-down-outline"></ha-icon>
                 </button>
               </div>` : "";
+
+        const saveAutomationHtml = (isScene && s.can_save_as_automation === true) ? `
+          <button class="save-automation-btn" data-save-automation="${i}" ${this._pendingAutomation ? "disabled" : ""}>
+            <ha-icon icon="mdi:robot-outline"></ha-icon> Save as Automation
+          </button>` : "";
+
         return `
           <div class="row" data-entity="${s.entity_id || ""}" data-index="${i}">
-            <div class="row-main${compactClass}" data-action="${i}" style="${borderStyle}">
+            <div class="row-main${compactClass}" data-action="${i}">
               <div class="icon-wrap" data-more-info="${s.entity_id || ""}" style="background:${iconBg}">
                 ${iconInner}
               </div>
               <div class="row-text">
                 <div class="row-name">${s.name || s.entity_id}</div>
                 <div class="row-sub">${subText}</div>
+                ${confidenceLabel(s)}
               </div>
               ${feedbackHtml}
               <button class="info-btn ${isExpanded ? "active" : ""}" data-info="${i}">
                 <ha-icon icon="mdi:information-outline"></ha-icon>
               </button>
             </div>
+            ${saveAutomationHtml}
             <div class="reason-panel ${isExpanded ? "open" : ""}">
               <div class="reason-inner">${s.reason || "No reason provided."}</div>
             </div>
@@ -593,27 +688,32 @@ class SmartSuggestionsCard extends HTMLElement {
         `;
       };
 
-      const buckets = { suggested: [], scene: [], stretch: [] };
+      const buckets = { scene: [], suggested: [], stretch: [] };
       suggestions.forEach((s, i) => {
         const domain = s.entity_id?.split(".")[0] || "";
+        const isSceneType = s.type === "scene" || domain === "scene";
         const key = (s.section && buckets[s.section] !== undefined)
           ? s.section
-          : domain === "scene" ? "scene" : "suggested";
+          : isSceneType ? "scene" : "suggested";
         buckets[key].push({ s, i });
       });
 
+      // Scenes rendered first with distinct card style, then other suggestions
       const sectionDefs = [
-        { key: "suggested", label: "Suggested for You" },
-        { key: "scene",     label: "Scenes" },
-        { key: "stretch",   label: "Worth Trying" },
+        { key: "scene",     label: "Scenes",             isScene: true  },
+        { key: "suggested", label: "Suggested for You",  isScene: false },
+        { key: "stretch",   label: "Worth Trying",       isScene: false },
       ];
 
       const sectionsHtml = sectionDefs
         .filter(({ key }) => buckets[key].length > 0)
-        .map(({ key, label }) => `
-          ${this._config.show_section_headers ? `<div class="section-header">${label}</div>` : ""}
-          <div class="list-wrap">${buckets[key].map(({ s, i }) => makeRow(s, i)).join("")}</div>
-        `).join("");
+        .map(({ key, label, isScene }) => {
+          const wrapClass = isScene ? "scene-list-wrap" : "list-wrap";
+          return `
+            ${this._config.show_section_headers ? `<div class="section-header">${label}</div>` : ""}
+            <div class="${wrapClass}">${buckets[key].map(({ s, i }) => makeRow(s, i, isScene)).join("")}</div>
+          `;
+        }).join("");
 
       bodyHtml = `<div class="sections">${sectionsHtml}</div>`;
     }
@@ -670,6 +770,20 @@ class SmartSuggestionsCard extends HTMLElement {
       el.addEventListener("click", (e) => {
         e.stopPropagation();
         this._toggleExpand(parseInt(el.dataset.info));
+      });
+    });
+    // Save as Automation buttons
+    this.shadowRoot.querySelectorAll("[data-save-automation]").forEach((btn) => {
+      btn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        if (this._pendingAutomation) return;
+        const index = parseInt(btn.dataset.saveAutomation);
+        const suggestions = this._getSuggestions();
+        const s = suggestions[index];
+        if (!s || !this._ws || this._ws.readyState !== WebSocket.OPEN) return;
+        this._pendingAutomation = true;
+        btn.disabled = true;
+        this._ws.send(JSON.stringify({ type: "save_automation", suggestion: s }));
       });
     });
   }
@@ -786,10 +900,6 @@ class SmartSuggestionsCardEditor extends HTMLElement {
           <ha-switch id="show_feedback"></ha-switch>
         </div>
         <div class="toggle-row">
-          <span class="toggle-label">Show confidence border</span>
-          <ha-switch id="show_confidence_border"></ha-switch>
-        </div>
-        <div class="toggle-row">
           <span class="toggle-label">Compact rows</span>
           <ha-switch id="compact"></ha-switch>
         </div>
@@ -840,7 +950,7 @@ class SmartSuggestionsCardEditor extends HTMLElement {
       empty.value = c.empty_message || "Thinking of suggestions…";
     }
 
-    for (const key of ["show_title", "show_refresh", "show_last_updated", "show_section_headers", "show_feedback", "show_confidence_border"]) {
+    for (const key of ["show_title", "show_refresh", "show_last_updated", "show_section_headers", "show_feedback"]) {
       const el = q(key);
       if (el) el.checked = c[key] !== false;
     }
@@ -867,7 +977,7 @@ class SmartSuggestionsCardEditor extends HTMLElement {
     q("icon")?.addEventListener("value-changed", (e) => this._setValue("icon", e.detail.value));
     q("empty_message")?.addEventListener("input", (e) => this._setValue("empty_message", e.target.value));
 
-    for (const key of ["show_title", "show_refresh", "show_last_updated", "show_section_headers", "show_feedback", "show_confidence_border", "compact"]) {
+    for (const key of ["show_title", "show_refresh", "show_last_updated", "show_section_headers", "show_feedback", "compact"]) {
       q(key)?.addEventListener("change", (e) => this._setValue(key, e.target.checked));
     }
 

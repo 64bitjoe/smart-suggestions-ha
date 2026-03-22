@@ -129,6 +129,7 @@ class SmartSuggestionsCard extends HTMLElement {
       ws.addEventListener("close", () => {
         this._wsConnected = false;
         this._ws = null;
+        this._pendingAutomation = false;
         if (this._wsEnabled) {
           // Retry with exponential backoff capped at 30s
           this._wsRetryTimeout = setTimeout(() => this._connectWS(), this._wsRetryDelay);
@@ -164,13 +165,12 @@ class SmartSuggestionsCard extends HTMLElement {
       }
       case "automation_result": {
         this._pendingAutomation = false;
+        this._render();  // re-enable buttons first
         if (msg.success) {
           this._showToast("Automation created!");
         } else {
           this._showYamlFallback(msg.yaml || "", msg.error || "Unknown error");
         }
-        // Re-render to re-enable Save as Automation buttons
-        this._render();
         break;
       }
     }

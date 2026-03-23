@@ -1758,12 +1758,26 @@ class SmartSuggestionsCardEditor extends HTMLElement {
 
 customElements.define("smart-suggestions-card-editor", SmartSuggestionsCardEditor);
 
+customElements.define("smart-suggestions-spotlight-card", SmartSuggestionsSpotlightCard);
+customElements.define("smart-suggestions-chip-card", SmartSuggestionsChipCard);
+customElements.define("smart-suggestions-tile-card", SmartSuggestionsTileCard);
+customElements.define("smart-suggestions-glance-card", SmartSuggestionsGlanceCard);
+customElements.define("smart-suggestions-banner-card", SmartSuggestionsBannerCard);
+
 window.customCards = window.customCards || [];
 window.customCards.push({
   type: "smart-suggestions-card",
   name: "Smart Suggestions",
   description: "AI-powered contextual suggestions via Ollama",
   preview: false,
+});
+
+["smart-suggestions-spotlight-card", "smart-suggestions-chip-card",
+ "smart-suggestions-tile-card", "smart-suggestions-glance-card",
+ "smart-suggestions-banner-card"].forEach(name => {
+  if (!window.customCards.find(c => c.type === name)) {
+    window.customCards.push({ type: name, name: name.replace(/-/g, " ").replace(/\b\w/g, c => c.toUpperCase()), preview: false });
+  }
 });
 
 console.info(

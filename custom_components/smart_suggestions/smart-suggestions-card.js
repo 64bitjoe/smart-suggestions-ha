@@ -4,7 +4,7 @@
  * Drop in /config/www/smart-suggestions-card.js
  */
 
-const CARD_VERSION = "1.1.0";
+const CARD_VERSION = "1.2.0";
 
 const DOMAIN_ICONS = {
   light: "mdi:lightbulb",
@@ -59,29 +59,36 @@ class SmartSuggestionsCard extends HTMLElement {
   }
 
   setConfig(config) {
-    // Spread raw config first, then apply defaults for any missing keys
-    const c = { ...config };
-    this._config = {
-      entity:                  c.entity                  ?? "smart_suggestions.suggestions",
-      title:                   c.title                   !== undefined ? c.title : "Suggested for You",
-      show_title:              c.show_title              !== false,
-      show_refresh:            c.show_refresh            !== false,
-      show_last_updated:       c.show_last_updated       !== false,
-      accent_color:            c.accent_color            || null,
-      empty_message:           c.empty_message           || "Thinking of suggestions…",
-      addon_url:               c.addon_url               || null,
-      compact:                 c.compact                 === true,
-      max_visible:             parseInt(c.max_visible)   || 0,
-      tap_action:              c.tap_action              || "execute",
-      show_feedback:           c.show_feedback           !== false,
-      show_section_headers:    c.show_section_headers    !== false,
-    };
-    this._render();
-    // Try to connect to the add-on WebSocket if a URL is configured
-    // or auto-detect via HA ingress slug
-    if (!this._wsEnabled) {
-      this._wsEnabled = true;
-      this._connectWS();
+    try {
+      // Spread raw config first, then apply defaults for any missing keys
+      const c = { ...config };
+      this._config = {
+        entity:                  c.entity                  ?? "smart_suggestions.suggestions",
+        title:                   c.title                   !== undefined ? c.title : "Suggested for You",
+        show_title:              c.show_title              !== false,
+        show_refresh:            c.show_refresh            !== false,
+        show_last_updated:       c.show_last_updated       !== false,
+        accent_color:            c.accent_color            || null,
+        empty_message:           c.empty_message           || "Thinking of suggestions…",
+        addon_url:               c.addon_url               || null,
+        compact:                 c.compact                 === true,
+        max_visible:             parseInt(c.max_visible)   || 0,
+        tap_action:              c.tap_action              || "execute",
+        show_feedback:           c.show_feedback           !== false,
+        show_section_headers:    c.show_section_headers    !== false,
+      };
+      // Defer render past any active view transition — prevents DOM mutation
+      // exceptions that cause HA to show "Configuration ..." on fast navigation.
+      requestAnimationFrame(() => this._render());
+      // Try to connect to the add-on WebSocket if a URL is configured
+      // or auto-detect via HA ingress slug
+      if (!this._wsEnabled) {
+        this._wsEnabled = true;
+        this._connectWS();
+      }
+    } catch (e) {
+      console.error("[SmartSuggestions] setConfig error:", e);
+      // Swallow so HA never shows "Configuration ..." — card recovers on next hass update.
     }
   }
 
@@ -445,13 +452,16 @@ class SmartSuggestionsCard extends HTMLElement {
       this._renderInner();
     } catch (e) {
       console.error("[SmartSuggestions] Render error:", e);
-      this.shadowRoot.innerHTML = `<ha-card style="padding:16px;color:var(--error-color,#f44336)">
-        Smart Suggestions render error — check browser console for details.
-      </ha-card>`;
+      try {
+        this.shadowRoot.innerHTML = `<ha-card style="padding:16px;color:var(--error-color,#f44336)">
+          Smart Suggestions render error — check browser console for details.
+        </ha-card>`;
+      } catch (_) { /* shadowRoot mutation during view transition — will recover */ }
     }
   }
 
   _renderInner() {
+    if (!this._config || !this._hass) return;
     const accent = this._config.accent_color || "#007AFF";
     const suggestions = this._getSuggestions();
     const status = this._getStatus();

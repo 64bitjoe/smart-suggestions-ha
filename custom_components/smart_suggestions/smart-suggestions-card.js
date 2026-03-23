@@ -1111,6 +1111,7 @@ class SmartSuggestionsChipCard extends HTMLElement {
     this._dismissed = new Set();
     this._longPressTimer = null;
     this._pressOrigin = null;
+    this._longPressHandled = false;
   }
 
   setConfig(config) {
@@ -1185,6 +1186,7 @@ class SmartSuggestionsChipCard extends HTMLElement {
       if (!s) return;
 
       chip.addEventListener("click", async () => {
+        if (this._longPressHandled) return;
         if (!this._hass) return;
         const domain = s.entity_id.split(".")[0];
         const svc = s.action || (domain === "scene" ? "turn_on" : "toggle");
@@ -1197,6 +1199,7 @@ class SmartSuggestionsChipCard extends HTMLElement {
       const startLongPress = (clientX, clientY) => {
         this._pressOrigin = { x: clientX, y: clientY };
         this._longPressTimer = setTimeout(() => {
+          this._longPressHandled = true;
           this._showPopover(chip, s);
           this._longPressTimer = null;
         }, 400);
@@ -1205,7 +1208,10 @@ class SmartSuggestionsChipCard extends HTMLElement {
         if (this._longPressTimer) { clearTimeout(this._longPressTimer); this._longPressTimer = null; }
       };
 
-      chip.addEventListener("pointerdown", e => startLongPress(e.clientX, e.clientY));
+      chip.addEventListener("pointerdown", e => {
+        this._longPressHandled = false;
+        startLongPress(e.clientX, e.clientY);
+      });
       chip.addEventListener("pointerup", cancelLongPress);
       chip.addEventListener("pointercancel", cancelLongPress);
       chip.addEventListener("pointermove", e => {
@@ -1397,6 +1403,7 @@ class SmartSuggestionsGlanceCard extends HTMLElement {
     this._config = {};
     this._hass = null;
     this._suggestions = [];
+    this._spotlightOverlay = null;
   }
 
   setConfig(config) {
@@ -1411,12 +1418,21 @@ class SmartSuggestionsGlanceCard extends HTMLElement {
   }
 
   connectedCallback() { SmartSuggestionsWS.register(this); }
-  disconnectedCallback() { SmartSuggestionsWS.unregister(this); }
+  disconnectedCallback() {
+    SmartSuggestionsWS.unregister(this);
+    if (this._spotlightOverlay) {
+      this._spotlightOverlay.remove();
+      this._spotlightOverlay = null;
+    }
+  }
   set hass(hass) { this._hass = hass; }
 
   _onWsUpdate(suggestions) {
     this._suggestions = suggestions;
     this._render();
+    if (this._spotlightOverlay) {
+      this._spotlightOverlay._onWsUpdate(suggestions, false);
+    }
   }
   _onWsMessage() {}
 
@@ -1457,12 +1473,22 @@ class SmartSuggestionsGlanceCard extends HTMLElement {
         if (tap === "more-info") {
           this.dispatchEvent(new CustomEvent("hass-more-info", { bubbles: true, composed: true, detail: { entityId: s.entity_id } }));
         } else if (tap === "spotlight") {
+          if (this._spotlightOverlay) {
+            this._spotlightOverlay.remove();
+            this._spotlightOverlay = null;
+          }
           const overlay = document.createElement("smart-suggestions-spotlight-card");
           overlay.style.cssText = "position:fixed;inset:0;z-index:9999;padding:20px;background:rgba(0,0,0,0.7);display:flex;align-items:center;";
           overlay.setConfig(this._config);
           overlay.hass = this._hass;
+          this._spotlightOverlay = overlay;
           document.body.appendChild(overlay);
-          overlay.addEventListener("click", e => { if (e.target === overlay) overlay.remove(); });
+          overlay.addEventListener("click", e => {
+            if (e.target === overlay) {
+              overlay.remove();
+              this._spotlightOverlay = null;
+            }
+          });
         }
       });
       this.shadowRoot.querySelector("#run-btn").addEventListener("click", async e => {
@@ -1502,8 +1528,12 @@ class SmartSuggestionsBannerCard extends HTMLElement {
   set hass(hass) { this._hass = hass; }
 
   _onWsUpdate(suggestions) {
+    const newFirst = suggestions[0]?.entity_id;
+    const oldFirst = this._suggestions[0]?.entity_id;
+    if (newFirst !== oldFirst) {
+      this._dismissed = false;
+    }
     this._suggestions = suggestions;
-    this._dismissed = false;
     this._render();
   }
   _onWsMessage() {}

@@ -29,7 +29,7 @@ async def _register_card(hass: HomeAssistant) -> None:
             cache_headers=False,
         )
     ])
-    frontend.add_extra_js_url(hass, f"/{DOMAIN}/smart-suggestions-card.js")
+    frontend.add_extra_js_url(hass, f"/{DOMAIN}/smart-suggestions-card.js?v=1.2.0")
     _static_path_registered = True
     _LOGGER.info("Smart Suggestions card registered")
 

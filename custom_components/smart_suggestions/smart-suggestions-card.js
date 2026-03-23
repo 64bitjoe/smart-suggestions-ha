@@ -39,6 +39,127 @@ const DOMAIN_COLORS = {
   input_boolean: "#007AFF",
 };
 
+// ── Shared helpers ──────────────────────────────────────────────
+
+function confidenceColor(label) {
+  return { high: "#34C759", medium: "#FF9F0A", low: "#8E8E93" }[label] ?? "#8E8E93";
+}
+
+function confidenceVisible(label) {
+  return label === "high" || label === "medium";
+}
+
+function reportOutcome(ws, entityId, action, outcome, confidence) {
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({ type: "outcome", entity_id: entityId, action, outcome, confidence }));
+  }
+}
+
+function getAddonWsUrl(config) {
+  if (config && config.addon_url) {
+    const base = config.addon_url.replace(/\/$/, "");
+    return base.replace(/^http/, "ws") + "/ws";
+  }
+  const protocol = location.protocol === "https:" ? "wss:" : "ws:";
+  return `${protocol}//${location.host}/api/hassio_ingress/smart_suggestions/ws`;
+}
+
+// ── Shared WebSocket Singleton ──────────────────────────────────
+
+const SmartSuggestionsWS = (() => {
+  let _ws = null;
+  let _retryTimeout = null;
+  let _retryDelay = 5000;
+  let _enabled = false;
+  let _suggestions = [];
+  let _isRefreshing = false;
+  let _listeners = new Set();
+  let _config = null;
+
+  function _broadcast() {
+    for (const card of _listeners) {
+      card._onWsUpdate(_suggestions, _isRefreshing);
+    }
+  }
+
+  function _connect() {
+    if (!_enabled || _listeners.size === 0) return;
+    const url = getAddonWsUrl(_config);
+    try {
+      const ws = new WebSocket(url);
+      _ws = ws;
+
+      ws.addEventListener("open", () => {
+        _retryDelay = 5000;
+        console.info("[SmartSuggestionsWS] Connected");
+      });
+
+      ws.addEventListener("message", (evt) => {
+        let msg;
+        try { msg = JSON.parse(evt.data); } catch { return; }
+        if (msg.type === "suggestions") {
+          _suggestions = Array.isArray(msg.data) ? msg.data : [];
+          _isRefreshing = false;
+          _broadcast();
+        } else if (msg.type === "status") {
+          const refreshing = msg.state === "updating";
+          if (refreshing !== _isRefreshing) {
+            _isRefreshing = refreshing;
+            _broadcast();
+          }
+        } else {
+          // Forward all other messages (e.g. yaml_result) to all cards
+          for (const card of _listeners) {
+            if (card._onWsMessage) card._onWsMessage(msg);
+          }
+        }
+      });
+
+      ws.addEventListener("close", () => {
+        _ws = null;
+        if (_enabled && _listeners.size > 0) {
+          _retryTimeout = setTimeout(() => _connect(), _retryDelay);
+          _retryDelay = Math.min(30000, _retryDelay * 2);
+        }
+      });
+
+      ws.addEventListener("error", () => ws.close());
+    } catch (_) {}
+  }
+
+  function _teardown() {
+    _enabled = false;
+    if (_retryTimeout) { clearTimeout(_retryTimeout); _retryTimeout = null; }
+    if (_ws) { _ws.close(); _ws = null; }
+    _retryDelay = 5000;
+  }
+
+  return {
+    register(card) {
+      _listeners.add(card);
+      if (_listeners.size === 1) {
+        if (card._config && Object.keys(card._config).length > 0) _config = card._config;
+        _enabled = true;
+        _connect();
+      }
+      // Immediately broadcast cached suggestions to the new card
+      if (_suggestions.length > 0 || _isRefreshing) {
+        card._onWsUpdate(_suggestions, _isRefreshing);
+      }
+    },
+    unregister(card) {
+      _listeners.delete(card);
+      if (_listeners.size === 0) _teardown();
+    },
+    get ws() { return _ws; },
+    send(msg) {
+      if (_ws && _ws.readyState === WebSocket.OPEN) {
+        _ws.send(JSON.stringify(msg));
+      }
+    },
+  };
+})();
+
 class SmartSuggestionsCard extends HTMLElement {
   constructor() {
     super();
@@ -48,14 +169,14 @@ class SmartSuggestionsCard extends HTMLElement {
     this._expandedIndex = null;
     this._isRefreshing = false;
     this._lastStateStr = null;
-    // Add-on WebSocket state
-    this._ws = null;
-    this._wsConnected = false;
+    // Add-on WebSocket state (managed by SmartSuggestionsWS singleton)
     this._wsSuggestions = [];
     this._wsRetryTimeout = null;
-    this._wsEnabled = false;
-    this._wsRetryDelay = 5000;
     this._pendingAutomation = false;
+  }
+
+  connectedCallback() {
+    SmartSuggestionsWS.register(this);
   }
 
   setConfig(config) {
@@ -80,12 +201,6 @@ class SmartSuggestionsCard extends HTMLElement {
       // Defer render past any active view transition — prevents DOM mutation
       // exceptions that cause HA to show "Configuration ..." on fast navigation.
       requestAnimationFrame(() => this._render());
-      // Try to connect to the add-on WebSocket if a URL is configured
-      // or auto-detect via HA ingress slug
-      if (!this._wsEnabled) {
-        this._wsEnabled = true;
-        this._connectWS();
-      }
     } catch (e) {
       console.error("[SmartSuggestions] setConfig error:", e);
       // Swallow so HA never shows "Configuration ..." — card recovers on next hass update.
@@ -93,83 +208,22 @@ class SmartSuggestionsCard extends HTMLElement {
   }
 
   disconnectedCallback() {
-    this._wsEnabled = false;
-    if (this._ws) {
-      this._ws.close();
-      this._ws = null;
-    }
-    if (this._wsRetryTimeout) {
-      clearTimeout(this._wsRetryTimeout);
-      this._wsRetryTimeout = null;
-    }
+    SmartSuggestionsWS.unregister(this);
+    if (this._wsRetryTimeout) { clearTimeout(this._wsRetryTimeout); this._wsRetryTimeout = null; }
   }
 
-  _getAddonWsUrl() {
-    // Explicit URL from card config takes priority
-    if (this._config.addon_url) {
-      const base = this._config.addon_url.replace(/\/$/, "");
-      return base.replace(/^http/, "ws") + "/ws";
-    }
-    // Auto-detect: try the standard ingress path for the slug "smart_suggestions"
-    const protocol = location.protocol === "https:" ? "wss:" : "ws:";
-    return `${protocol}//${location.host}/api/hassio_ingress/smart_suggestions/ws`;
+  _onWsUpdate(suggestions, isRefreshing) {
+    this._wsSuggestions = suggestions;
+    this._isRefreshing = isRefreshing;
+    this._render();
   }
 
-  _connectWS() {
-    if (!this._wsEnabled) return;
-    const url = this._getAddonWsUrl();
-    try {
-      const ws = new WebSocket(url);
-      this._ws = ws;
-
-      ws.addEventListener("open", () => {
-        this._wsConnected = true;
-        console.info("[SmartSuggestions] Add-on WebSocket connected");
-      });
-
-      ws.addEventListener("message", (evt) => {
-        let msg;
-        try { msg = JSON.parse(evt.data); } catch { return; }
-        this._handleWsMessage(msg);
-      });
-
-      ws.addEventListener("close", () => {
-        this._wsConnected = false;
-        this._ws = null;
-        this._pendingAutomation = false;
-        if (this._wsEnabled) {
-          // Retry with exponential backoff capped at 30s
-          this._wsRetryTimeout = setTimeout(() => this._connectWS(), this._wsRetryDelay);
-          this._wsRetryDelay = Math.min(30000, this._wsRetryDelay * 2);
-        }
-      });
-
-      ws.addEventListener("error", () => {
-        // Silently fall back to HA state polling — add-on may not be installed
-        ws.close();
-      });
-    } catch (_) {
-      // WebSocket constructor failed (e.g. invalid URL) — just use fallback
-    }
+  _onWsMessage(msg) {
+    this._handleWsMessage(msg);
   }
 
   _handleWsMessage(msg) {
     switch (msg.type) {
-      case "suggestions": {
-        this._isRefreshing = false;
-        // Directly inject suggestions — bypasses HA state polling
-        this._wsSuggestions = Array.isArray(msg.data) ? msg.data : [];
-        this._render();
-        break;
-      }
-      case "status": {
-        const isUpdating = msg.state === "updating";
-        if (isUpdating !== this._isRefreshing) {
-          this._isRefreshing = isUpdating;
-          this._render();
-        }
-        break;
-      }
       case "automation_result": {
         this._pendingAutomation = false;
         this._render();  // re-enable buttons first
@@ -196,7 +250,7 @@ class SmartSuggestionsCard extends HTMLElement {
   _getSuggestions() {
     // Prefer live suggestions pushed from add-on WebSocket
     let suggestions;
-    if (this._wsConnected && Array.isArray(this._wsSuggestions) && this._wsSuggestions.length) {
+    if (SmartSuggestionsWS.ws !== null && Array.isArray(this._wsSuggestions) && this._wsSuggestions.length) {
       suggestions = this._wsSuggestions;
     } else {
       // Fallback: read from HA state (works without the add-on)
@@ -212,7 +266,7 @@ class SmartSuggestionsCard extends HTMLElement {
 
   _getStatus() {
     // When the WebSocket is connected, use its status
-    if (this._wsConnected) {
+    if (SmartSuggestionsWS.ws !== null) {
       return this._isRefreshing ? "updating" : "ready";
     }
     if (!this._hass) return "idle";
@@ -790,10 +844,10 @@ class SmartSuggestionsCard extends HTMLElement {
         const index = parseInt(btn.dataset.saveAutomation);
         const suggestions = this._getSuggestions();
         const s = suggestions[index];
-        if (!s || !this._ws || this._ws.readyState !== WebSocket.OPEN) return;
+        if (!s || SmartSuggestionsWS.ws === null) return;
         this._pendingAutomation = true;
         btn.disabled = true;
-        this._ws.send(JSON.stringify({ type: "save_automation", suggestion: s }));
+        SmartSuggestionsWS.send({ type: "save_automation", suggestion: s });
       });
     });
   }

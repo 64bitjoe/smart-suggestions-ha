@@ -234,6 +234,19 @@ class SmartSuggestionsCard extends HTMLElement {
         }
         break;
       }
+      case "yaml_result": {
+        // Re-enable any loading Get YAML buttons
+        this.shadowRoot.querySelectorAll(".get-yaml-btn.loading").forEach(btn => {
+          btn.classList.remove("loading");
+          btn.textContent = "Get Automation YAML";
+        });
+        if (msg.yaml) {
+          this._showYamlFallback(msg.yaml, "");
+        } else {
+          this._showYamlFallback("", msg.error || "Failed to generate YAML");
+        }
+        break;
+      }
     }
   }
 
@@ -348,18 +361,22 @@ class SmartSuggestionsCard extends HTMLElement {
       return;
     }
 
+    const confScore = ({ high: 1.0, medium: 0.6, low: 0.3 }[suggestion.confidence] ?? 0);
     try {
       if (domain === "scene") {
         await this._hass.callService("scene", "turn_on", { entity_id });
         this._flashRow(entity_id);
+        reportOutcome(SmartSuggestionsWS.ws, entity_id, action || "turn_on", "run", confScore);
         return;
       }
       if (domain === "automation" || type === "automation") {
         await this._hass.callService("automation", "trigger", { entity_id });
+        reportOutcome(SmartSuggestionsWS.ws, entity_id, action || "trigger", "run", confScore);
         return;
       }
       if (domain === "script" || type === "script") {
         await this._hass.callService("script", "turn_on", { entity_id });
+        reportOutcome(SmartSuggestionsWS.ws, entity_id, action || "turn_on", "run", confScore);
         return;
       }
       const svc = action || "toggle";
@@ -368,6 +385,7 @@ class SmartSuggestionsCard extends HTMLElement {
         ...(action_data || {}),
       });
       this._flashRow(entity_id);
+      reportOutcome(SmartSuggestionsWS.ws, entity_id, svc, "run", confScore);
     } catch (e) {
       console.error("[SmartSuggestions] Action failed:", e);
     }
@@ -578,8 +596,10 @@ class SmartSuggestionsCard extends HTMLElement {
 
       /* ── Reason expansion ── */
       .reason-panel { overflow: hidden; max-height: 0; transition: max-height 0.28s cubic-bezier(0.4,0,0.2,1); }
-      .reason-panel.open { max-height: 150px; }
+      .reason-panel.open { max-height: 220px; }
       .reason-inner { padding: 8px 14px 13px 62px; font-size: 13px; line-height: 1.55; color: var(--secondary-text-color, #8E8E93); border-top: 0.5px solid rgba(255,255,255,0.07); }
+      .get-yaml-btn { margin-top: 8px; background: none; border: 1px solid ${accent}; color: ${accent}; border-radius: 6px; padding: 4px 10px; font-size: 12px; cursor: pointer; -webkit-tap-highlight-color: transparent; }
+      .get-yaml-btn.loading { opacity: 0.5; pointer-events: none; }
 
       /* ── Flash ── */
       .row.flash .row-main { animation: flash-row 0.6s ease; }
@@ -746,7 +766,10 @@ class SmartSuggestionsCard extends HTMLElement {
             </div>
             ${saveAutomationHtml}
             <div class="reason-panel ${isExpanded ? "open" : ""}">
-              <div class="reason-inner">${s.reason || "No reason provided."}</div>
+              <div class="reason-inner">
+                ${s.reason || "No reason provided."}
+                <br><button class="get-yaml-btn" data-eid="${this._escapeHtml(s.entity_id || "")}" data-action="${this._escapeHtml(s.action || "")}">Get Automation YAML</button>
+              </div>
             </div>
           </div>
         `;
@@ -816,7 +839,14 @@ class SmartSuggestionsCard extends HTMLElement {
     this.shadowRoot.querySelectorAll("[data-feedback-eid]").forEach((btn) => {
       btn.addEventListener("click", (e) => {
         e.stopPropagation();
-        this._sendFeedback(btn.dataset.feedbackEid, btn.dataset.vote);
+        const eid = btn.dataset.feedbackEid;
+        const vote = btn.dataset.vote;
+        this._sendFeedback(eid, vote);
+        if (vote === "down") {
+          const suggestion = this._getSuggestions().find(s => s.entity_id === eid);
+          const confScore = ({ high: 1.0, medium: 0.6, low: 0.3 }[suggestion?.confidence] ?? 0);
+          reportOutcome(SmartSuggestionsWS.ws, eid, suggestion?.action || "toggle", "dismissed", confScore);
+        }
       });
     });
     // Icon tap / long press → more-info popup
@@ -834,6 +864,25 @@ class SmartSuggestionsCard extends HTMLElement {
       el.addEventListener("click", (e) => {
         e.stopPropagation();
         this._toggleExpand(parseInt(el.dataset.info));
+      });
+    });
+    // Get Automation YAML buttons
+    this.shadowRoot.querySelectorAll(".get-yaml-btn").forEach((yamlBtnEl) => {
+      yamlBtnEl.addEventListener("click", (e) => {
+        e.stopPropagation();
+        const eid = yamlBtnEl.dataset.eid;
+        const action = yamlBtnEl.dataset.action;
+        const suggestions = this._getSuggestions();
+        const suggestion = suggestions.find(s => s.entity_id === eid);
+        yamlBtnEl.classList.add("loading");
+        yamlBtnEl.textContent = "Building…";
+        SmartSuggestionsWS.send({
+          type: "build_yaml",
+          entity_id: eid,
+          action: action,
+          name: suggestion?.name || eid,
+          reason: suggestion?.reason || "",
+        });
       });
     });
     // Save as Automation buttons

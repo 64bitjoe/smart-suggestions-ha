@@ -282,7 +282,7 @@ No UX changes. Gets:
 **Layout:**
 - CSS grid, `columns` config (default 2, max 3), `grid-gap: 8px`
 - Each tile: 1:1 aspect ratio, rounded corners (12px), `background: rgba(255,255,255,0.07)`
-- Confidence border: 2px solid — green (`#34C759`) for high, amber (`#FF9F0A`) for medium, grey (`#8E8E93`) for low (using `CONFIDENCE_HIGH` / `CONFIDENCE_MEDIUM` thresholds)
+- Confidence border: 2px solid — green (`#34C759`) for `"high"`, amber (`#FF9F0A`) for `"medium"`, grey (`#8E8E93`) for `"low"`
 - Tile content: large icon centered (40px), entity friendly name below (13px), confidence label pill at bottom
 
 **Behavior:**
@@ -336,7 +336,7 @@ No UX changes. Gets:
 - X (dismiss): hides banner until next suggestion push (session-level, not persisted), reports `outcome: dismissed`
 - Tapping reason text: dispatches `hass-more-info` for top suggestion entity_id
 
-**Shows only when:** suggestions array is non-empty AND top suggestion confidence ≥ `CONFIDENCE_MEDIUM`
+**Shows only when:** suggestions array is non-empty AND `confidenceVisible(topSuggestion.confidence)` returns true (i.e., confidence label is `"high"` or `"medium"`)
 
 **Loading state:** Hidden (banner only appears when there is something to say)
 

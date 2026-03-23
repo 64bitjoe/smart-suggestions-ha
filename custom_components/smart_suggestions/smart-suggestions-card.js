@@ -157,6 +157,11 @@ const SmartSuggestionsWS = (() => {
         _ws.send(JSON.stringify(msg));
       }
     },
+    setConfig(cfg) {
+      if (cfg && Object.keys(cfg).length > 0) {
+        _config = cfg;
+      }
+    },
   };
 })();
 
@@ -171,8 +176,8 @@ class SmartSuggestionsCard extends HTMLElement {
     this._lastStateStr = null;
     // Add-on WebSocket state (managed by SmartSuggestionsWS singleton)
     this._wsSuggestions = [];
-    this._wsRetryTimeout = null;
     this._pendingAutomation = false;
+    this._pendingYamlEid = null;
   }
 
   connectedCallback() {
@@ -198,6 +203,7 @@ class SmartSuggestionsCard extends HTMLElement {
         show_feedback:           c.show_feedback           !== false,
         show_section_headers:    c.show_section_headers    !== false,
       };
+      SmartSuggestionsWS.setConfig(this._config);
       // Defer render past any active view transition — prevents DOM mutation
       // exceptions that cause HA to show "Configuration ..." on fast navigation.
       requestAnimationFrame(() => this._render());
@@ -209,7 +215,6 @@ class SmartSuggestionsCard extends HTMLElement {
 
   disconnectedCallback() {
     SmartSuggestionsWS.unregister(this);
-    if (this._wsRetryTimeout) { clearTimeout(this._wsRetryTimeout); this._wsRetryTimeout = null; }
   }
 
   _onWsUpdate(suggestions, isRefreshing) {
@@ -235,6 +240,7 @@ class SmartSuggestionsCard extends HTMLElement {
         break;
       }
       case "yaml_result": {
+        this._pendingYamlEid = null;
         // Re-enable any loading Get YAML buttons
         this.shadowRoot.querySelectorAll(".get-yaml-btn.loading").forEach(btn => {
           btn.classList.remove("loading");
@@ -768,7 +774,7 @@ class SmartSuggestionsCard extends HTMLElement {
             <div class="reason-panel ${isExpanded ? "open" : ""}">
               <div class="reason-inner">
                 ${s.reason || "No reason provided."}
-                <br><button class="get-yaml-btn" data-eid="${this._escapeHtml(s.entity_id || "")}" data-action="${this._escapeHtml(s.action || "")}">Get Automation YAML</button>
+                <br>${(() => { const yamlPending = this._pendingYamlEid === s.entity_id; return `<button class="get-yaml-btn${yamlPending ? ' loading' : ''}" data-eid="${this._escapeHtml(s.entity_id || "")}" data-action="${this._escapeHtml(s.action || "")}">${yamlPending ? 'Building…' : 'Get Automation YAML'}</button>`; })()}
               </div>
             </div>
           </div>
@@ -874,6 +880,7 @@ class SmartSuggestionsCard extends HTMLElement {
         const action = yamlBtnEl.dataset.action;
         const suggestions = this._getSuggestions();
         const suggestion = suggestions.find(s => s.entity_id === eid);
+        this._pendingYamlEid = eid;
         yamlBtnEl.classList.add("loading");
         yamlBtnEl.textContent = "Building…";
         SmartSuggestionsWS.send({

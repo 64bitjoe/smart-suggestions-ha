@@ -1,10 +1,9 @@
 /**
  * Smart Suggestions Card
  * AI-powered contextual action suggestions for Home Assistant
- * Drop in /config/www/smart-suggestions-card.js
  */
 
-const CARD_VERSION = "2.0.0";
+const CARD_VERSION = "2.1.0";
 
 const DOMAIN_ICONS = {
   light: "mdi:lightbulb",
@@ -22,7 +21,6 @@ const DOMAIN_ICONS = {
   input_boolean: "mdi:toggle-switch",
 };
 
-// iOS system colour palette — one per domain
 const DOMAIN_COLORS = {
   light:         "#FF9F0A",
   switch:        "#007AFF",
@@ -62,6 +60,10 @@ function getAddonWsUrl(config) {
   }
   const protocol = location.protocol === "https:" ? "wss:" : "ws:";
   return `${protocol}//${location.host}/api/hassio_ingress/smart_suggestions/ws`;
+}
+
+function confScore(s) {
+  return ({ high: 1.0, medium: 0.6, low: 0.3 }[s?.confidence] ?? 0);
 }
 
 // ── Shared WebSocket Singleton ──────────────────────────────────
@@ -108,7 +110,6 @@ const SmartSuggestionsWS = (() => {
             _broadcast();
           }
         } else {
-          // Forward all other messages (e.g. yaml_result) to all cards
           for (const card of _listeners) {
             if (card._onWsMessage) card._onWsMessage(msg);
           }
@@ -142,7 +143,6 @@ const SmartSuggestionsWS = (() => {
         _enabled = true;
         _connect();
       }
-      // Immediately broadcast cached suggestions to the new card
       if (_suggestions.length > 0 || _isRefreshing) {
         card._onWsUpdate(_suggestions, _isRefreshing);
       }
@@ -165,56 +165,156 @@ const SmartSuggestionsWS = (() => {
   };
 })();
 
-class SmartSuggestionsCard extends HTMLElement {
+// ── Base Card ───────────────────────────────────────────────────
+
+class SmartSuggestionsBaseCard extends HTMLElement {
   constructor() {
     super();
     this.attachShadow({ mode: "open" });
     this._config = {};
     this._hass = null;
-    this._expandedIndex = null;
+    this._wsSuggestions = [];
     this._isRefreshing = false;
     this._lastStateStr = null;
-    // Add-on WebSocket state (managed by SmartSuggestionsWS singleton)
-    this._wsSuggestions = [];
-    this._pendingAutomation = false;
-    this._pendingYamlEid = null;
   }
 
-  connectedCallback() {
-    SmartSuggestionsWS.register(this);
+  /** Subclasses override to provide card-specific default config. */
+  _defaultConfig() {
+    return {
+      entity: "smart_suggestions.suggestions",
+      title: "Suggested for You",
+      show_title: true,
+      accent_color: null,
+      max_visible: 0,
+      empty_message: "Thinking of suggestions…",
+    };
   }
 
   setConfig(config) {
     try {
-      // Spread raw config first, then apply defaults for any missing keys
-      const c = { ...config };
-      this._config = {
-        entity:                  c.entity                  ?? "smart_suggestions.suggestions",
-        title:                   c.title                   !== undefined ? c.title : "Suggested for You",
-        show_title:              c.show_title              !== false,
-        show_refresh:            c.show_refresh            !== false,
-        show_last_updated:       c.show_last_updated       !== false,
-        accent_color:            c.accent_color            || null,
-        empty_message:           c.empty_message           || "Thinking of suggestions…",
-        addon_url:               c.addon_url               || null,
-        compact:                 c.compact                 === true,
-        max_visible:             parseInt(c.max_visible)   || 0,
-        tap_action:              c.tap_action              || "execute",
-        show_feedback:           c.show_feedback           !== false,
-        show_section_headers:    c.show_section_headers    !== false,
-      };
+      const defaults = this._defaultConfig();
+      const c = {};
+      for (const key of Object.keys(defaults)) {
+        c[key] = config[key] !== undefined ? config[key] : defaults[key];
+      }
+      // Preserve any extra keys from config (addon_url, etc.)
+      for (const key of Object.keys(config)) {
+        if (!(key in c)) c[key] = config[key];
+      }
+      this._config = c;
       SmartSuggestionsWS.setConfig(this._config);
-      // Defer render past any active view transition — prevents DOM mutation
-      // exceptions that cause HA to show "Configuration ..." on fast navigation.
       requestAnimationFrame(() => this._render());
     } catch (e) {
       console.error("[SmartSuggestions] setConfig error:", e);
-      // Swallow so HA never shows "Configuration ..." — card recovers on next hass update.
     }
   }
 
-  disconnectedCallback() {
-    SmartSuggestionsWS.unregister(this);
+  connectedCallback() { SmartSuggestionsWS.register(this); }
+  disconnectedCallback() { SmartSuggestionsWS.unregister(this); }
+
+  set hass(hass) {
+    this._hass = hass;
+    const entity = this._config.entity || "smart_suggestions.suggestions";
+    const state = hass.states[entity];
+    const stateStr = JSON.stringify(state?.attributes?.suggestions) + state?.state;
+    if (stateStr !== this._lastStateStr) {
+      this._lastStateStr = stateStr;
+      this._render();
+    }
+  }
+
+  _onWsUpdate(suggestions, isRefreshing) {
+    this._wsSuggestions = suggestions;
+    this._isRefreshing = isRefreshing;
+    this._render();
+  }
+
+  _onWsMessage(_msg) {}
+
+  _getSuggestions() {
+    let suggestions;
+    if (SmartSuggestionsWS.ws !== null && Array.isArray(this._wsSuggestions) && this._wsSuggestions.length) {
+      suggestions = this._wsSuggestions;
+    } else {
+      if (!this._hass) return [];
+      const entity = this._config.entity || "smart_suggestions.suggestions";
+      const state = this._hass.states[entity];
+      if (!state) return [];
+      const s = state.attributes.suggestions;
+      suggestions = Array.isArray(s) ? s : [];
+    }
+    const max = parseInt(this._config.max_visible) || 0;
+    return max > 0 ? suggestions.slice(0, max) : suggestions;
+  }
+
+  _getStatus() {
+    if (SmartSuggestionsWS.ws !== null) {
+      return this._isRefreshing ? "updating" : "ready";
+    }
+    if (!this._hass) return "idle";
+    const entity = this._config.entity || "smart_suggestions.suggestions";
+    return this._hass.states[entity]?.state || "idle";
+  }
+
+  _getLastUpdated() {
+    if (!this._hass) return null;
+    const entity = this._config.entity || "smart_suggestions.suggestions";
+    const lu = this._hass.states[entity]?.attributes?.last_updated;
+    return lu ? new Date(lu) : null;
+  }
+
+  _render() {
+    // Subclasses implement this
+  }
+
+  _callService(s) {
+    if (!this._hass || !s.entity_id) return;
+    const domain = s.entity_id.split(".")[0];
+    const svc = s.action || (domain === "scene" ? "turn_on" : domain === "automation" ? "trigger" : domain === "script" ? "turn_on" : "toggle");
+    this._hass.callService(domain, svc, { entity_id: s.entity_id }).catch(() => {});
+    reportOutcome(SmartSuggestionsWS.ws, s.entity_id, svc, "run", confScore(s));
+  }
+
+  _showMoreInfo(entityId) {
+    this.dispatchEvent(new CustomEvent("hass-more-info", {
+      bubbles: true, composed: true, detail: { entityId },
+    }));
+  }
+
+  getCardSize() { return 3; }
+
+  static getStubConfig() {
+    return { entity: "smart_suggestions.suggestions", title: "Suggested for You" };
+  }
+}
+
+// ── Main Card ───────────────────────────────────────────────────
+
+class SmartSuggestionsCard extends SmartSuggestionsBaseCard {
+  constructor() {
+    super();
+    this._expandedIndex = null;
+    this._pendingAutomation = false;
+    this._pendingYamlEid = null;
+  }
+
+  _defaultConfig() {
+    return {
+      entity:               "smart_suggestions.suggestions",
+      title:                "Suggested for You",
+      show_title:           true,
+      show_refresh:         true,
+      show_last_updated:    true,
+      accent_color:         null,
+      empty_message:        "Thinking of suggestions…",
+      addon_url:            null,
+      compact:              false,
+      max_visible:          0,
+      tap_action:           "execute",
+      show_feedback:        true,
+      show_section_headers: true,
+      icon:                 undefined,
+    };
   }
 
   _onWsUpdate(suggestions, isRefreshing) {
@@ -228,14 +328,10 @@ class SmartSuggestionsCard extends HTMLElement {
   }
 
   _onWsMessage(msg) {
-    this._handleWsMessage(msg);
-  }
-
-  _handleWsMessage(msg) {
     switch (msg.type) {
       case "automation_result": {
         this._pendingAutomation = false;
-        this._render();  // re-enable buttons first
+        this._render();
         if (msg.success) {
           this._showToast("Automation created!");
         } else {
@@ -245,7 +341,6 @@ class SmartSuggestionsCard extends HTMLElement {
       }
       case "yaml_result": {
         this._pendingYamlEid = null;
-        // Re-enable any loading Get YAML buttons
         this.shadowRoot.querySelectorAll(".get-yaml-btn.loading").forEach(btn => {
           btn.classList.remove("loading");
           btn.textContent = "Get Automation YAML";
@@ -260,48 +355,6 @@ class SmartSuggestionsCard extends HTMLElement {
     }
   }
 
-  set hass(hass) {
-    this._hass = hass;
-    const state = hass.states[this._config.entity];
-    const stateStr = JSON.stringify(state?.attributes?.suggestions) + state?.state;
-    if (stateStr !== this._lastStateStr) {
-      this._lastStateStr = stateStr;
-      this._render();
-    }
-  }
-
-  _getSuggestions() {
-    // Prefer live suggestions pushed from add-on WebSocket
-    let suggestions;
-    if (SmartSuggestionsWS.ws !== null && Array.isArray(this._wsSuggestions) && this._wsSuggestions.length) {
-      suggestions = this._wsSuggestions;
-    } else {
-      // Fallback: read from HA state (works without the add-on)
-      if (!this._hass) return [];
-      const state = this._hass.states[this._config.entity];
-      if (!state) return [];
-      const s = state.attributes.suggestions;
-      suggestions = Array.isArray(s) ? s : [];
-    }
-    const max = this._config.max_visible;
-    return max > 0 ? suggestions.slice(0, max) : suggestions;
-  }
-
-  _getStatus() {
-    // When the WebSocket is connected, use its status
-    if (SmartSuggestionsWS.ws !== null) {
-      return this._isRefreshing ? "updating" : "ready";
-    }
-    if (!this._hass) return "idle";
-    return this._hass.states[this._config.entity]?.state || "idle";
-  }
-
-  _getLastUpdated() {
-    if (!this._hass) return null;
-    const lu = this._hass.states[this._config.entity]?.attributes?.last_updated;
-    return lu ? new Date(lu) : null;
-  }
-
   _formatRelativeTime(date) {
     if (!date) return "";
     const diff = Math.floor((Date.now() - date.getTime()) / 1000);
@@ -314,14 +367,11 @@ class SmartSuggestionsCard extends HTMLElement {
   _resolveIcon(suggestion) {
     const eid = suggestion.entity_id;
     const state = eid && this._hass ? this._hass.states[eid] : null;
-    // 1. Custom icon set in HA entity registry / customization
     if (state?.attributes?.icon) return state.attributes.icon;
-    // 2. Ollama-provided icon — validate it's a real mdi: string
     const sugIcon = suggestion.icon;
     if (sugIcon && typeof sugIcon === "string" && sugIcon.startsWith("mdi:") && sugIcon.length > 5) {
       return sugIcon;
     }
-    // 3. State-based icons for common entities
     if (state && eid) {
       const domain = eid.split(".")[0];
       const s = state.state;
@@ -336,7 +386,6 @@ class SmartSuggestionsCard extends HTMLElement {
       if (domain === "fan")          return s === "on" ? "mdi:fan" : "mdi:fan-off";
       if (domain === "vacuum")       return s === "cleaning" ? "mdi:robot-vacuum" : "mdi:robot-vacuum-variant";
     }
-    // 4. Domain fallback
     if (eid) return DOMAIN_ICONS[eid.split(".")[0]] || "mdi:star-circle";
     return "mdi:star-circle";
   }
@@ -351,7 +400,6 @@ class SmartSuggestionsCard extends HTMLElement {
     if (!this._hass) return;
     const { entity_id, action, action_data, type } = suggestion;
 
-    // Navigate actions don't need an entity
     if (action === "navigate" && action_data?.path) {
       history.pushState(null, "", action_data.path);
       window.dispatchEvent(new PopStateEvent("popstate"));
@@ -365,48 +413,36 @@ class SmartSuggestionsCard extends HTMLElement {
 
     const domain = entity_id.split(".")[0];
 
-    // Guard: entity must exist in HA before calling a service
     if (!this._hass.states[entity_id] && domain !== "scene" && domain !== "script" && domain !== "automation") {
       console.warn("[SmartSuggestions] Entity not in HA states — skipping:", entity_id);
       return;
     }
 
-    const confScore = ({ high: 1.0, medium: 0.6, low: 0.3 }[suggestion.confidence] ?? 0);
+    const cs = confScore(suggestion);
     try {
       if (domain === "scene") {
         await this._hass.callService("scene", "turn_on", { entity_id });
         this._flashRow(entity_id);
-        reportOutcome(SmartSuggestionsWS.ws, entity_id, action || "turn_on", "run", confScore);
+        reportOutcome(SmartSuggestionsWS.ws, entity_id, action || "turn_on", "run", cs);
         return;
       }
       if (domain === "automation" || type === "automation") {
         await this._hass.callService("automation", "trigger", { entity_id });
-        reportOutcome(SmartSuggestionsWS.ws, entity_id, action || "trigger", "run", confScore);
+        reportOutcome(SmartSuggestionsWS.ws, entity_id, action || "trigger", "run", cs);
         return;
       }
       if (domain === "script" || type === "script") {
         await this._hass.callService("script", "turn_on", { entity_id });
-        reportOutcome(SmartSuggestionsWS.ws, entity_id, action || "turn_on", "run", confScore);
+        reportOutcome(SmartSuggestionsWS.ws, entity_id, action || "turn_on", "run", cs);
         return;
       }
       const svc = action || "toggle";
-      await this._hass.callService(domain, svc, {
-        entity_id,
-        ...(action_data || {}),
-      });
+      await this._hass.callService(domain, svc, { entity_id, ...(action_data || {}) });
       this._flashRow(entity_id);
-      reportOutcome(SmartSuggestionsWS.ws, entity_id, svc, "run", confScore);
+      reportOutcome(SmartSuggestionsWS.ws, entity_id, svc, "run", cs);
     } catch (e) {
       console.error("[SmartSuggestions] Action failed:", e);
     }
-  }
-
-  _showMoreInfo(entityId) {
-    this.dispatchEvent(new CustomEvent("hass-more-info", {
-      bubbles: true,
-      composed: true,
-      detail: { entityId },
-    }));
   }
 
   _flashRow(entityId) {
@@ -420,10 +456,8 @@ class SmartSuggestionsCard extends HTMLElement {
     if (this._isRefreshing) return;
     this._isRefreshing = true;
     this._render();
-    // Send refresh_all to add-on via WebSocket for full pipeline refresh
     SmartSuggestionsWS.send({ type: "refresh_all" });
     this._showToast("Refreshing everything…");
-    // Fallback timeout in case we don't get a status update
     this._refreshTimeout = setTimeout(() => {
       this._isRefreshing = false;
       this._render();
@@ -436,13 +470,11 @@ class SmartSuggestionsCard extends HTMLElement {
   }
 
   _showToast(message) {
-    // Remove any existing toast
     const existing = this.shadowRoot.querySelector(".toast");
     if (existing) existing.remove();
     const toast = document.createElement("div");
     toast.className = "toast";
     toast.textContent = message;
-    // Append to shadow root host level so it overlays the card
     this.shadowRoot.appendChild(toast);
     setTimeout(() => {
       toast.style.transition = "opacity 0.3s";
@@ -452,7 +484,6 @@ class SmartSuggestionsCard extends HTMLElement {
   }
 
   _showYamlFallback(yaml, error) {
-    // Remove any existing modal
     const existing = this.shadowRoot.querySelector(".yaml-overlay");
     if (existing) existing.remove();
 
@@ -483,11 +514,7 @@ class SmartSuggestionsCard extends HTMLElement {
   }
 
   _escapeHtml(str) {
-    return String(str)
-      .replace(/&/g, "&amp;")
-      .replace(/</g, "&lt;")
-      .replace(/>/g, "&gt;")
-      .replace(/"/g, "&quot;");
+    return String(str).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
   }
 
   async _sendFeedback(entityId, vote) {
@@ -511,25 +538,11 @@ class SmartSuggestionsCard extends HTMLElement {
   }
 
   _getActionLabel(action) {
-    const map = {
-      turn_on: "Turn On",
-      turn_off: "Turn Off",
-      toggle: "Toggle",
-      trigger: "Trigger",
-      navigate: "Go To",
-    };
-    return map[action] || action;
+    return { turn_on: "Turn On", turn_off: "Turn Off", toggle: "Toggle", trigger: "Trigger", navigate: "Go To" }[action] || action;
   }
 
   _getActionDot(action) {
-    const map = {
-      turn_on: "#4ade80",
-      turn_off: "#f87171",
-      toggle: "#60a5fa",
-      trigger: "#a78bfa",
-      navigate: "#fb923c",
-    };
-    return map[action] || "#94a3b8";
+    return { turn_on: "#4ade80", turn_off: "#f87171", toggle: "#60a5fa", trigger: "#a78bfa", navigate: "#fb923c" }[action] || "#94a3b8";
   }
 
   _render() {
@@ -541,7 +554,7 @@ class SmartSuggestionsCard extends HTMLElement {
         this.shadowRoot.innerHTML = `<ha-card style="padding:16px;color:var(--error-color,#f44336)">
           Smart Suggestions render error — check browser console for details.
         </ha-card>`;
-      } catch (_) { /* shadowRoot mutation during view transition — will recover */ }
+      } catch (_) {}
     }
   }
 
@@ -557,8 +570,6 @@ class SmartSuggestionsCard extends HTMLElement {
       *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
       :host { display: block; font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', system-ui, sans-serif; }
       .card { background: var(--ha-card-background, #1C1C1E); border-radius: 16px; overflow: hidden; }
-
-      /* ── Header ── */
       .header { display: flex; align-items: center; justify-content: space-between; padding: 14px 16px 12px; }
       .header-left { display: flex; align-items: center; gap: 9px; }
       .header-icon { width: 30px; height: 30px; border-radius: 8px; background: ${accent}; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
@@ -571,67 +582,43 @@ class SmartSuggestionsCard extends HTMLElement {
       .refresh-btn ha-icon { --mdc-icon-size: 20px; }
       .refresh-btn.spinning ha-icon { animation: spin 1s linear infinite; }
       @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
-
-      /* ── Typing dots ── */
       .typing-dots span { display: inline-block; width: 3px; height: 3px; border-radius: 50%; background: ${accent}; margin: 0 1px; animation: tdot 1.2s ease-in-out infinite; vertical-align: middle; }
       .typing-dots span:nth-child(2) { animation-delay: 0.2s; }
       .typing-dots span:nth-child(3) { animation-delay: 0.4s; }
       @keyframes tdot { 0%,80%,100% { transform: translateY(0); opacity: 0.35; } 40% { transform: translateY(-2px); opacity: 1; } }
-
-      /* ── Sections ── */
       .sections { margin: 0 12px 14px; }
       .section-header { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.07em; color: var(--secondary-text-color, #8E8E93); padding: 10px 2px 5px; }
       .sections > .section-header:first-child { padding-top: 0; }
-
-      /* ── Inset grouped list ── */
       .list-wrap { border-radius: 12px; overflow: hidden; background: rgba(255,255,255,0.07); margin-bottom: 6px; }
       .sections .list-wrap:last-child { margin-bottom: 0; }
-
-      /* ── Row ── */
       .row { display: flex; flex-direction: column; position: relative; }
       .row + .row .row-main::before { content: ''; position: absolute; top: 0; left: 62px; right: 0; height: 0.5px; background: rgba(255,255,255,0.09); }
       .row-main { display: flex; align-items: center; padding: 10px 12px 10px 14px; min-height: 56px; cursor: pointer; gap: 12px; user-select: none; -webkit-tap-highlight-color: transparent; position: relative; transition: background 0.12s; }
       .row-main:active { background: rgba(255,255,255,0.07); }
-
-      /* ── Domain icon ── */
       .icon-wrap { width: 36px; height: 36px; border-radius: 9px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; cursor: pointer; }
       .icon-wrap ha-icon { --mdc-icon-size: 20px; color: #fff; }
-
-      /* ── Row text ── */
       .row-text { flex: 1; min-width: 0; }
       .row-name { font-size: 15px; font-weight: 400; color: var(--primary-text-color, #fff); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; line-height: 1.3; }
       .row-sub { font-size: 12px; color: var(--secondary-text-color, #8E8E93); margin-top: 1px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-
-      /* ── Info button ── */
       .info-btn { width: 30px; height: 30px; border-radius: 50%; background: none; border: none; cursor: pointer; display: flex; align-items: center; justify-content: center; color: ${accent}; opacity: 0.65; -webkit-tap-highlight-color: transparent; flex-shrink: 0; transition: opacity 0.15s; }
       .info-btn:active, .info-btn.active { opacity: 1; }
       .info-btn ha-icon { --mdc-icon-size: 19px; }
-
-      /* ── Reason expansion ── */
       .reason-panel { overflow: hidden; max-height: 0; transition: max-height 0.28s cubic-bezier(0.4,0,0.2,1); }
       .reason-panel.open { max-height: 220px; }
       .reason-inner { padding: 8px 14px 13px 62px; font-size: 13px; line-height: 1.55; color: var(--secondary-text-color, #8E8E93); border-top: 0.5px solid rgba(255,255,255,0.07); }
       .get-yaml-btn { margin-top: 8px; background: none; border: 1px solid ${accent}; color: ${accent}; border-radius: 6px; padding: 4px 10px; font-size: 12px; cursor: pointer; -webkit-tap-highlight-color: transparent; }
       .get-yaml-btn.loading { opacity: 0.5; pointer-events: none; }
-
-      /* ── Flash ── */
       .row.flash .row-main { animation: flash-row 0.6s ease; }
       @keyframes flash-row { 0% { background: rgba(52,199,89,0); } 25% { background: rgba(52,199,89,0.14); } 100% { background: rgba(52,199,89,0); } }
-
-      /* ── Compact mode ── */
       .row-main.compact { padding: 6px 10px 6px 12px; min-height: 44px; gap: 10px; }
       .row-main.compact .icon-wrap { width: 30px; height: 30px; border-radius: 8px; }
       .row-main.compact .icon-wrap ha-icon { --mdc-icon-size: 17px; }
       .row-main.compact .row-name { font-size: 13.5px; }
       .row-main.compact .row-sub { font-size: 11px; }
-
-      /* ── Confidence label ── */
       .confidence-label { display:inline-block; font-size:10px; font-weight:600; text-transform:uppercase; letter-spacing:0.05em; padding:1px 6px; border-radius:20px; background:rgba(255,255,255,0.08); color:var(--secondary-text-color,#8E8E93); margin-top:2px; white-space:nowrap; }
       .confidence-label.high { background:rgba(52,199,89,0.15); color:#34C759; }
       .confidence-label.medium { background:rgba(255,159,10,0.15); color:#FF9F0A; }
       .confidence-label.low { background:rgba(142,142,147,0.12); color:#8E8E93; }
-
-      /* ── Scene cards ── */
       .scene-list-wrap { border-radius: 12px; overflow: hidden; background: rgba(191,90,242,0.10); border: 1px solid rgba(191,90,242,0.22); margin-bottom: 10px; }
       .scene-list-wrap .row-main { padding: 12px 12px 12px 14px; min-height: 62px; }
       .scene-list-wrap .row-name { font-size: 15.5px; font-weight: 500; }
@@ -639,8 +626,6 @@ class SmartSuggestionsCard extends HTMLElement {
       .save-automation-btn ha-icon { --mdc-icon-size:15px; }
       .save-automation-btn:active { background:rgba(191,90,242,0.28); }
       .save-automation-btn:disabled { opacity:0.45; cursor:default; }
-
-      /* ── Vote buttons ── */
       .feedback-area { display:flex; gap:2px; align-items:center; flex-shrink:0; }
       .vote-btn { width:28px; height:28px; border-radius:50%; background:none; border:none; cursor:pointer; display:flex; align-items:center; justify-content:center; color:var(--secondary-text-color,#8E8E93); opacity:0.5; transition:opacity 0.15s,color 0.15s; -webkit-tap-highlight-color:transparent; }
       .vote-btn ha-icon { --mdc-icon-size:15px; }
@@ -648,12 +633,8 @@ class SmartSuggestionsCard extends HTMLElement {
       .vote-btn.voted-down { color:#FF3B30; opacity:1; }
       @keyframes vote-pop { 0%{transform:scale(1)} 40%{transform:scale(1.4)} 100%{transform:scale(1)} }
       .vote-btn.pop { animation:vote-pop 0.25s ease; }
-
-      /* ── Toast ── */
       .toast { position:fixed; bottom:32px; left:50%; transform:translateX(-50%) translateY(0); background:rgba(30,30,32,0.95); color:#fff; font-size:14px; font-weight:500; padding:10px 20px; border-radius:24px; box-shadow:0 4px 20px rgba(0,0,0,0.45); z-index:9999; pointer-events:none; animation:toast-in 0.22s ease; }
       @keyframes toast-in { from { opacity:0; transform:translateX(-50%) translateY(8px); } to { opacity:1; transform:translateX(-50%) translateY(0); } }
-
-      /* ── YAML modal ── */
       .yaml-overlay { position:fixed; inset:0; background:rgba(0,0,0,0.65); z-index:9998; display:flex; align-items:flex-end; justify-content:center; }
       .yaml-drawer { background:#1C1C1E; border-radius:20px 20px 0 0; width:100%; max-width:600px; padding:20px 18px 32px; box-shadow:0 -4px 40px rgba(0,0,0,0.5); }
       .yaml-header { display:flex; align-items:center; justify-content:space-between; margin-bottom:12px; }
@@ -663,12 +644,8 @@ class SmartSuggestionsCard extends HTMLElement {
       .yaml-pre { background:rgba(255,255,255,0.06); border-radius:10px; padding:12px; overflow:auto; max-height:260px; font-size:12px; font-family:ui-monospace,monospace; color:#e2e8f0; white-space:pre; }
       .yaml-copy-btn { margin-top:12px; width:100%; padding:11px; background:rgba(255,255,255,0.09); border:1px solid rgba(255,255,255,0.13); border-radius:10px; color:var(--primary-text-color,#fff); font-size:14px; font-weight:600; cursor:pointer; }
       .yaml-copy-btn:active { background:rgba(255,255,255,0.16); }
-
-      /* ── Empty ── */
       .empty { padding: 36px 20px; text-align: center; color: var(--secondary-text-color, #8E8E93); font-size: 14px; }
       .empty ha-icon { --mdc-icon-size: 38px; display: block; margin: 0 auto 10px; opacity: 0.22; }
-
-      /* ── Skeleton ── */
       .skel-wrap { margin: 0 12px 14px; border-radius: 12px; overflow: hidden; background: rgba(255,255,255,0.07); }
       .skeleton { display: flex; align-items: center; gap: 12px; padding: 10px 14px; min-height: 56px; }
       .skeleton + .skeleton { border-top: 0.5px solid rgba(255,255,255,0.06); }
@@ -716,7 +693,6 @@ class SmartSuggestionsCard extends HTMLElement {
     } else if (suggestions.length === 0) {
       bodyHtml = `<div class="empty"><ha-icon icon="mdi:shimmer"></ha-icon>${this._config.empty_message}</div>`;
     } else {
-      // Confidence label helper
       const confidenceLabel = (s) => {
         const score = s.score ?? 50;
         const conf = s.confidence;
@@ -798,7 +774,6 @@ class SmartSuggestionsCard extends HTMLElement {
         buckets[key].push({ s, i });
       });
 
-      // Scenes rendered first with distinct card style, then other suggestions
       const sectionDefs = [
         { key: "scene",     label: "Scenes",             isScene: true  },
         { key: "suggested", label: "Suggested for You",  isScene: false },
@@ -830,7 +805,6 @@ class SmartSuggestionsCard extends HTMLElement {
     if (refreshBtn) {
       refreshBtn.addEventListener("click", (e) => { e.stopPropagation(); this._triggerRefresh(); });
     }
-    // Row tap — behaviour controlled by tap_action config
     this.shadowRoot.querySelectorAll("[data-action]").forEach((el) => {
       el.addEventListener("click", (e) => {
         if (e.target.closest("[data-info]") || e.target.closest("[data-more-info]") || e.target.closest("[data-feedback-eid]")) return;
@@ -848,7 +822,6 @@ class SmartSuggestionsCard extends HTMLElement {
         }
       });
     });
-    // Vote buttons
     this.shadowRoot.querySelectorAll("[data-feedback-eid]").forEach((btn) => {
       btn.addEventListener("click", (e) => {
         e.stopPropagation();
@@ -857,12 +830,10 @@ class SmartSuggestionsCard extends HTMLElement {
         this._sendFeedback(eid, vote);
         if (vote === "down") {
           const suggestion = this._getSuggestions().find(s => s.entity_id === eid);
-          const confScore = ({ high: 1.0, medium: 0.6, low: 0.3 }[suggestion?.confidence] ?? 0);
-          reportOutcome(SmartSuggestionsWS.ws, eid, suggestion?.action || "toggle", "dismissed", confScore);
+          reportOutcome(SmartSuggestionsWS.ws, eid, suggestion?.action || "toggle", "dismissed", confScore(suggestion));
         }
       });
     });
-    // Icon tap / long press → more-info popup
     this.shadowRoot.querySelectorAll("[data-more-info]").forEach((el) => {
       const handler = (e) => {
         e.stopPropagation();
@@ -872,14 +843,12 @@ class SmartSuggestionsCard extends HTMLElement {
       el.addEventListener("click", handler);
       el.addEventListener("contextmenu", (e) => { e.preventDefault(); handler(e); });
     });
-    // Info button → expand reason
     this.shadowRoot.querySelectorAll("[data-info]").forEach((el) => {
       el.addEventListener("click", (e) => {
         e.stopPropagation();
         this._toggleExpand(parseInt(el.dataset.info));
       });
     });
-    // Get Automation YAML buttons
     this.shadowRoot.querySelectorAll(".get-yaml-btn").forEach((yamlBtnEl) => {
       yamlBtnEl.addEventListener("click", (e) => {
         e.stopPropagation();
@@ -891,15 +860,11 @@ class SmartSuggestionsCard extends HTMLElement {
         yamlBtnEl.classList.add("loading");
         yamlBtnEl.textContent = "Building…";
         SmartSuggestionsWS.send({
-          type: "build_yaml",
-          entity_id: eid,
-          action: action,
-          name: suggestion?.name || eid,
-          reason: suggestion?.reason || "",
+          type: "build_yaml", entity_id: eid, action: action,
+          name: suggestion?.name || eid, reason: suggestion?.reason || "",
         });
       });
     });
-    // Save as Automation buttons
     this.shadowRoot.querySelectorAll("[data-save-automation]").forEach((btn) => {
       btn.addEventListener("click", (e) => {
         e.stopPropagation();
@@ -920,7 +885,9 @@ class SmartSuggestionsCard extends HTMLElement {
   }
 
   static getConfigElement() {
-    return document.createElement("smart-suggestions-card-editor");
+    const el = document.createElement("smart-suggestions-card-editor");
+    el._cardType = "main";
+    return el;
   }
 
   static getStubConfig() {
@@ -928,40 +895,23 @@ class SmartSuggestionsCard extends HTMLElement {
   }
 }
 
-class SmartSuggestionsSpotlightCard extends HTMLElement {
+// ── Spotlight Card ──────────────────────────────────────────────
+
+class SmartSuggestionsSpotlightCard extends SmartSuggestionsBaseCard {
   constructor() {
     super();
-    this.attachShadow({ mode: "open" });
-    this._config = {};
-    this._hass = null;
-    this._suggestions = [];
-    this._isRefreshing = false;
     this._currentIndex = 0;
   }
 
-  setConfig(config) {
-    this._config = {
-      title:         config.title !== undefined ? config.title : "Suggested for You",
-      show_title:    config.show_title !== false,
-      accent_color:  config.accent_color || "#007AFF",
-      max_visible:   parseInt(config.max_visible) || 0,
-      empty_message: config.empty_message || "Thinking of suggestions…",
+  _defaultConfig() {
+    return {
+      entity:        "smart_suggestions.suggestions",
+      title:         "Suggested for You",
+      show_title:    true,
+      accent_color:  "#007AFF",
+      max_visible:   0,
+      empty_message: "Thinking of suggestions…",
     };
-    SmartSuggestionsWS.setConfig(this._config);
-    requestAnimationFrame(() => this._render());
-  }
-
-  connectedCallback() { SmartSuggestionsWS.register(this); }
-  disconnectedCallback() { SmartSuggestionsWS.unregister(this); }
-
-  set hass(hass) { this._hass = hass; }
-
-  _onWsUpdate(suggestions, isRefreshing) {
-    const max = this._config.max_visible;
-    this._suggestions = max > 0 ? suggestions.slice(0, max) : suggestions;
-    this._isRefreshing = isRefreshing;
-    if (this._currentIndex >= this._suggestions.length) this._currentIndex = 0;
-    this._render();
   }
 
   _onWsMessage(msg) {
@@ -980,181 +930,163 @@ class SmartSuggestionsSpotlightCard extends HTMLElement {
     overlay.className = "yaml-overlay";
     overlay.innerHTML = `
       <div class="yaml-drawer">
-        <div class="yaml-header"><span>Automation YAML</span><button id="yclose">&times;</button></div>
+        <div class="yaml-header"><span>Automation YAML</span><button id="yaml-close">&times;</button></div>
         ${error ? `<div class="yaml-error">${error}</div>` : ""}
-        <pre class="yaml-pre">${yaml.replace(/&/g,"&amp;").replace(/</g,"&lt;")}</pre>
-        ${yaml ? `<button id="ycopy">Copy YAML</button>` : ""}
+        <pre class="yaml-pre">${String(yaml).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;")}</pre>
+        <button class="yaml-copy" id="yaml-copy">Copy YAML</button>
       </div>`;
     this.shadowRoot.appendChild(overlay);
-    overlay.querySelector("#yclose").addEventListener("click", () => overlay.remove());
+    overlay.querySelector("#yaml-close").addEventListener("click", () => overlay.remove());
     overlay.addEventListener("click", e => { if (e.target === overlay) overlay.remove(); });
-    if (yaml) {
-      overlay.querySelector("#ycopy").addEventListener("click", () => {
-        navigator.clipboard.writeText(yaml).then(() => {
-          overlay.querySelector("#ycopy").textContent = "Copied!";
-        }).catch(() => {});
-      });
-    }
+    overlay.querySelector("#yaml-copy").addEventListener("click", () => {
+      navigator.clipboard.writeText(yaml).then(() => {
+        overlay.querySelector("#yaml-copy").textContent = "Copied!";
+        setTimeout(() => overlay.querySelector("#yaml-copy") && (overlay.querySelector("#yaml-copy").textContent = "Copy YAML"), 2000);
+      }).catch(() => {});
+    });
   }
 
   _render() {
     if (!this._config) return;
     const accent = this._config.accent_color;
-    const s = this._suggestions[this._currentIndex];
-    const total = this._suggestions.length;
+    const suggestions = this._getSuggestions();
+    const s = suggestions[this._currentIndex];
+    if (this._currentIndex >= suggestions.length) this._currentIndex = 0;
 
-    const icon = s ? (DOMAIN_ICONS[s.entity_id?.split(".")[0]] || "mdi:star-circle") : "mdi:star-circle";
-    const iconColor = s ? (DOMAIN_COLORS[s.entity_id?.split(".")[0]] || accent) : accent;
+    if (!s) {
+      this.shadowRoot.innerHTML = `
+        <style>:host { display: block; font-family: -apple-system, BlinkMacSystemFont, system-ui, sans-serif; }
+        .empty { padding: 36px 20px; text-align:center; color:var(--secondary-text-color,#8E8E93); font-size:14px; }</style>
+        <ha-card><div class="empty">${this._config.empty_message}</div></ha-card>`;
+      return;
+    }
+
+    const domain = s.entity_id?.split(".")[0] || "scene";
+    const icon = DOMAIN_ICONS[domain] || "mdi:star-circle";
+    const color = DOMAIN_COLORS[domain] || "#8E8E93";
+    const confCol = confidenceColor(s.confidence);
+    const isFirst = this._currentIndex === 0;
+    const isLast = this._currentIndex >= suggestions.length - 1;
 
     this.shadowRoot.innerHTML = `
       <style>
         *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
         :host { display: block; font-family: -apple-system, BlinkMacSystemFont, system-ui, sans-serif; }
-        .card { background: var(--ha-card-background, #1C1C1E); border-radius: 16px; padding: 20px 16px 16px; }
-        .title-row { font-size: 13px; font-weight: 600; color: var(--secondary-text-color, #8E8E93); text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 16px; }
-        .icon-wrap { width: 64px; height: 64px; border-radius: 18px; background: ${iconColor}; display: flex; align-items: center; justify-content: center; margin: 0 auto 14px; }
-        .icon-wrap ha-icon { --mdc-icon-size: 36px; color: #fff; }
-        .name { font-size: 20px; font-weight: 600; color: var(--primary-text-color, #fff); text-align: center; margin-bottom: 6px; }
-        .reason { font-size: 14px; color: var(--secondary-text-color, #8E8E93); text-align: center; line-height: 1.5; margin-bottom: 10px; min-height: 42px; }
-        .badge { display: inline-block; font-size: 11px; font-weight: 600; text-transform: uppercase; padding: 2px 8px; border-radius: 20px; margin-bottom: 16px; }
-        .badge.high { background: rgba(52,199,89,0.15); color: #34C759; }
-        .badge.medium { background: rgba(255,159,10,0.15); color: #FF9F0A; }
-        .badge.low { background: rgba(142,142,147,0.12); color: #8E8E93; }
-        .actions { display: flex; gap: 8px; margin-bottom: 14px; }
-        .btn { flex: 1; padding: 10px 4px; border: none; border-radius: 10px; font-size: 14px; font-weight: 600; cursor: pointer; -webkit-tap-highlight-color: transparent; transition: opacity 0.15s; }
-        .btn:active { opacity: 0.7; }
-        .btn-run { background: ${accent}; color: #fff; }
-        .btn-yaml { background: rgba(255,255,255,0.1); color: var(--primary-text-color, #fff); }
-        .btn-dismiss { background: rgba(255,255,255,0.07); color: var(--secondary-text-color, #8E8E93); }
-        .nav { display: flex; align-items: center; justify-content: center; gap: 12px; }
-        .nav-btn { background: none; border: none; color: ${accent}; cursor: pointer; padding: 4px 8px; font-size: 20px; -webkit-tap-highlight-color: transparent; }
+        .card { background: var(--ha-card-background, #1C1C1E); border-radius: 16px; padding: 24px 20px; text-align: center; position: relative; }
+        ${this._config.show_title ? `.title { font-size: 13px; font-weight: 600; color: var(--secondary-text-color, #8E8E93); text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 20px; }` : ""}
+        .icon-circle { width: 64px; height: 64px; border-radius: 20px; background: ${color}; display: flex; align-items: center; justify-content: center; margin: 0 auto 14px; }
+        .icon-circle ha-icon { --mdc-icon-size: 32px; color: #fff; }
+        .name { font-size: 20px; font-weight: 600; color: var(--primary-text-color, #fff); margin-bottom: 6px; }
+        .reason { font-size: 14px; color: var(--secondary-text-color, #8E8E93); line-height: 1.5; margin-bottom: 12px; padding: 0 10px; }
+        .badge { display: inline-block; font-size: 10px; font-weight: 700; text-transform: uppercase; padding: 2px 8px; border-radius: 20px; background: ${confCol}22; color: ${confCol}; margin-bottom: 18px; }
+        .actions { display: flex; gap: 8px; justify-content: center; margin-bottom: 16px; }
+        .act-btn { padding: 10px 20px; border-radius: 10px; border: none; font-size: 14px; font-weight: 600; cursor: pointer; -webkit-tap-highlight-color: transparent; }
+        .act-run { background: ${accent}; color: #fff; }
+        .act-yaml { background: rgba(255,255,255,0.1); color: var(--primary-text-color, #fff); }
+        .nav { display: flex; justify-content: space-between; padding: 0 10px; }
+        .nav-btn { background: none; border: none; color: ${accent}; font-size: 14px; font-weight: 600; cursor: pointer; padding: 4px 8px; opacity: 1; -webkit-tap-highlight-color: transparent; }
         .nav-btn:disabled { opacity: 0.3; cursor: default; }
-        .dots { display: flex; gap: 5px; }
-        .dot { width: 6px; height: 6px; border-radius: 50%; background: rgba(255,255,255,0.25); }
-        .dot.active { background: ${accent}; }
-        .empty { text-align: center; padding: 32px 16px; color: var(--secondary-text-color, #8E8E93); font-size: 14px; }
-        .thinking { display: flex; justify-content: center; gap: 4px; padding: 32px 0; }
-        .thinking span { width: 6px; height: 6px; border-radius: 50%; background: ${accent}; animation: tdot 1.2s ease-in-out infinite; }
-        .thinking span:nth-child(2) { animation-delay: 0.2s; }
-        .thinking span:nth-child(3) { animation-delay: 0.4s; }
-        @keyframes tdot { 0%,80%,100% { transform:translateY(0);opacity:0.35; } 40% { transform:translateY(-3px);opacity:1; } }
-        .yaml-overlay { position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:9999;display:flex;align-items:flex-end; }
-        .yaml-drawer { background:var(--ha-card-background,#1C1C1E);width:100%;border-radius:16px 16px 0 0;padding:16px;max-height:60vh;overflow-y:auto; }
-        .yaml-header { display:flex;justify-content:space-between;align-items:center;margin-bottom:12px; }
-        .yaml-pre { font-size:12px;overflow-x:auto;white-space:pre;color:var(--primary-text-color,#fff); }
-        #yclose { background:none;border:none;color:var(--primary-text-color,#fff);font-size:22px;cursor:pointer; }
-        #ycopy { margin-top:12px;background:${accent};color:#fff;border:none;border-radius:8px;padding:8px 16px;font-size:14px;cursor:pointer;width:100%; }
-        .yaml-error { color: #f87171; font-size: 13px; margin-bottom: 8px; }
+        .counter { font-size: 12px; color: var(--secondary-text-color, #8E8E93); }
+        .yaml-overlay { position:fixed; inset:0; background:rgba(0,0,0,0.65); z-index:9999; display:flex; align-items:flex-end; justify-content:center; }
+        .yaml-drawer { background:#1C1C1E; border-radius:20px 20px 0 0; width:100%; max-width:600px; padding:20px 18px 32px; }
+        .yaml-header { display:flex; justify-content:space-between; margin-bottom:12px; font-size:16px; font-weight:700; color:var(--primary-text-color,#fff); }
+        .yaml-header button { background:none; border:none; color:var(--secondary-text-color); font-size:22px; cursor:pointer; }
+        .yaml-error { font-size:12px; color:#FF3B30; margin-bottom:8px; }
+        .yaml-pre { background:rgba(255,255,255,0.06); border-radius:10px; padding:12px; overflow:auto; max-height:260px; font-size:12px; font-family:ui-monospace,monospace; color:#e2e8f0; white-space:pre; }
+        .yaml-copy { margin-top:12px; width:100%; padding:11px; background:rgba(255,255,255,0.09); border:1px solid rgba(255,255,255,0.13); border-radius:10px; color:var(--primary-text-color,#fff); font-size:14px; font-weight:600; cursor:pointer; }
       </style>
       <ha-card>
         <div class="card">
-          ${this._config.show_title ? `<div class="title-row">${this._config.title}</div>` : ""}
-          ${this._isRefreshing ? `<div class="thinking"><span></span><span></span><span></span></div>` :
-            !s ? `<div class="empty">${this._config.empty_message}</div>` : `
-            <div style="text-align:center">
-              <div class="icon-wrap"><ha-icon icon="${icon}"></ha-icon></div>
-              <div class="name">${s.name || s.entity_id}</div>
-              <div class="reason">${s.reason || ""}</div>
-              <div class="badge ${s.confidence || "low"}">${s.confidence || "low"}</div>
-            </div>
-            <div class="actions">
-              <button class="btn btn-run" id="btn-run">Run</button>
-              <button class="btn btn-yaml" id="btn-yaml">Get YAML</button>
-              <button class="btn btn-dismiss" id="btn-dismiss">Dismiss</button>
-            </div>
-            <div class="nav">
-              <button class="nav-btn" id="btn-prev" ${this._currentIndex === 0 ? "disabled" : ""}>‹</button>
-              <div class="dots">${this._suggestions.map((_, i) =>
-                `<div class="dot ${i === this._currentIndex ? "active" : ""}"></div>`
-              ).join("")}</div>
-              <button class="nav-btn" id="btn-next" ${this._currentIndex >= total - 1 ? "disabled" : ""}>›</button>
-            </div>
-          `}
+          ${this._config.show_title ? `<div class="title">${this._config.title}</div>` : ""}
+          <div class="icon-circle"><ha-icon icon="${icon}"></ha-icon></div>
+          <div class="name">${s.name || s.entity_id}</div>
+          <div class="reason">${s.reason || ""}</div>
+          <div class="badge">${s.confidence || "low"}</div>
+          <div class="actions">
+            <button class="act-btn act-run" id="btn-run">Run Now</button>
+            <button class="act-btn act-yaml" id="btn-yaml">Get YAML</button>
+          </div>
+          <div class="nav">
+            <button class="nav-btn" id="btn-prev" ${isFirst ? "disabled" : ""}>&larr; Previous</button>
+            <span class="counter">${this._currentIndex + 1} / ${suggestions.length}</span>
+            <button class="nav-btn" id="btn-next" ${isLast ? "disabled" : ""}>Next &rarr;</button>
+          </div>
         </div>
       </ha-card>`;
 
-    if (s) {
-      this.shadowRoot.querySelector("#btn-run")?.addEventListener("click", async () => {
-        if (!this._hass) return;
-        const domain = s.entity_id.split(".")[0];
-        const svc = s.action || (domain === "scene" ? "turn_on" : "toggle");
-        try { await this._hass.callService(domain, svc, { entity_id: s.entity_id }); } catch (_) {}
-        reportOutcome(SmartSuggestionsWS.ws, s.entity_id, s.action || "toggle", "run", ({ high: 1.0, medium: 0.6, low: 0.3 }[s.confidence] ?? 0));
-        this._currentIndex = Math.min(this._currentIndex + 1, this._suggestions.length - 1);
-        this._render();
-      });
+    this.shadowRoot.querySelector("#btn-run")?.addEventListener("click", () => {
+      this._callService(s);
+    });
 
-      this.shadowRoot.querySelector("#btn-yaml")?.addEventListener("click", () => {
-        SmartSuggestionsWS.send({ type: "build_yaml", entity_id: s.entity_id, action: s.action || "", name: s.name || s.entity_id, reason: s.reason || "" });
-      });
+    this.shadowRoot.querySelector("#btn-yaml")?.addEventListener("click", () => {
+      SmartSuggestionsWS.send({ type: "build_yaml", entity_id: s.entity_id, action: s.action || "", name: s.name || s.entity_id, reason: s.reason || "" });
+      reportOutcome(SmartSuggestionsWS.ws, s.entity_id, s.action || "toggle", "saved", confScore(s));
+    });
 
-      this.shadowRoot.querySelector("#btn-dismiss")?.addEventListener("click", () => {
-        reportOutcome(SmartSuggestionsWS.ws, s.entity_id, s.action || "toggle", "dismissed", ({ high: 1.0, medium: 0.6, low: 0.3 }[s.confidence] ?? 0));
-        this._currentIndex = Math.min(this._currentIndex + 1, this._suggestions.length - 1);
-        this._render();
-      });
-
-      this.shadowRoot.querySelector("#btn-prev")?.addEventListener("click", () => {
-        if (this._currentIndex > 0) { this._currentIndex--; this._render(); }
-      });
-      this.shadowRoot.querySelector("#btn-next")?.addEventListener("click", () => {
-        if (this._currentIndex < this._suggestions.length - 1) { this._currentIndex++; this._render(); }
-      });
-    }
+    this.shadowRoot.querySelector("#btn-prev")?.addEventListener("click", () => {
+      if (this._currentIndex > 0) { this._currentIndex--; this._render(); }
+    });
+    this.shadowRoot.querySelector("#btn-next")?.addEventListener("click", () => {
+      if (this._currentIndex < suggestions.length - 1) { this._currentIndex++; this._render(); }
+    });
   }
 
-  static getConfigElement() { return document.createElement("div"); }
-  static getStubConfig() { return {}; }
+  static getConfigElement() {
+    const el = document.createElement("smart-suggestions-card-editor");
+    el._cardType = "spotlight";
+    return el;
+  }
+
+  static getStubConfig() {
+    return { entity: "smart_suggestions.suggestions", title: "Suggested for You" };
+  }
 }
 
-class SmartSuggestionsChipCard extends HTMLElement {
+// ── Chip Card ───────────────────────────────────────────────────
+
+class SmartSuggestionsChipCard extends SmartSuggestionsBaseCard {
   constructor() {
     super();
-    this.attachShadow({ mode: "open" });
-    this._config = {};
-    this._hass = null;
-    this._suggestions = [];
-    this._isRefreshing = false;
     this._dismissed = new Set();
     this._longPressTimer = null;
     this._pressOrigin = null;
     this._longPressHandled = false;
   }
 
-  setConfig(config) {
-    this._config = {
-      title:        config.title !== undefined ? config.title : "",
-      show_title:   config.show_title === true,
-      accent_color: config.accent_color || "#007AFF",
-      max_visible:  parseInt(config.max_visible) || 5,
-      empty_message: config.empty_message || "No suggestions right now",
+  _defaultConfig() {
+    return {
+      entity:        "smart_suggestions.suggestions",
+      title:         "",
+      show_title:    false,
+      accent_color:  "#007AFF",
+      max_visible:   5,
+      empty_message: "No suggestions right now",
     };
-    SmartSuggestionsWS.setConfig(this._config);
-    requestAnimationFrame(() => this._render());
   }
 
-  connectedCallback() { SmartSuggestionsWS.register(this); }
   disconnectedCallback() {
-    SmartSuggestionsWS.unregister(this);
+    super.disconnectedCallback();
     if (this._longPressTimer) clearTimeout(this._longPressTimer);
   }
 
-  set hass(hass) { this._hass = hass; }
-
   _onWsUpdate(suggestions, isRefreshing) {
-    const max = this._config.max_visible;
-    this._suggestions = suggestions.slice(0, max).filter(s => !this._dismissed.has(s.entity_id));
+    const max = parseInt(this._config.max_visible) || 5;
+    this._wsSuggestions = suggestions;
     this._isRefreshing = isRefreshing;
     this._render();
   }
 
-  _onWsMessage() {}
+  _getSuggestions() {
+    const all = super._getSuggestions();
+    return all.filter(s => !this._dismissed.has(s.entity_id));
+  }
 
   _render() {
     if (!this._config) return;
-    const accent = this._config.accent_color;
+    const accent = this._config.accent_color || "#007AFF";
+    const suggestions = this._getSuggestions();
 
-    const chips = this._suggestions.map((s, i) => {
+    const chips = suggestions.map((s, i) => {
       const domain = s.entity_id?.split(".")[0] || "scene";
       const icon = DOMAIN_ICONS[domain] || "mdi:star-circle";
       const label = (s.name || s.entity_id || "").substring(0, 22);
@@ -1189,18 +1121,14 @@ class SmartSuggestionsChipCard extends HTMLElement {
       </div>`;
 
     this.shadowRoot.querySelectorAll(".chip").forEach((chip, i) => {
-      const s = this._suggestions[i];
+      const s = suggestions[i];
       if (!s) return;
 
       chip.addEventListener("click", async () => {
         if (this._longPressHandled) return;
-        if (!this._hass) return;
-        const domain = s.entity_id.split(".")[0];
-        const svc = s.action || (domain === "scene" ? "turn_on" : "toggle");
-        try { await this._hass.callService(domain, svc, { entity_id: s.entity_id }); } catch (_) {}
+        this._callService(s);
         chip.classList.add("flash");
         setTimeout(() => chip.classList.remove("flash"), 600);
-        reportOutcome(SmartSuggestionsWS.ws, s.entity_id, s.action || "toggle", "run", ({ high: 1.0, medium: 0.6, low: 0.3 }[s.confidence] ?? 0));
       });
 
       const startLongPress = (clientX, clientY) => {
@@ -1229,7 +1157,6 @@ class SmartSuggestionsChipCard extends HTMLElement {
       });
     });
 
-    // Close popover on outside tap
     this.shadowRoot.addEventListener("click", e => {
       const popover = this.shadowRoot.querySelector(".popover");
       if (popover && !popover.contains(e.target)) popover.remove();
@@ -1244,7 +1171,6 @@ class SmartSuggestionsChipCard extends HTMLElement {
       <div class="pop-reason">${s.reason || "No reason provided."}</div>
       <button class="pop-btn" id="pop-yaml">Save as Automation</button>
       <button class="pop-btn dismiss" id="pop-dismiss">Dismiss</button>`;
-    // Position below chip
     const rect = chip.getBoundingClientRect();
     const hostRect = this.getBoundingClientRect();
     pop.style.position = "absolute";
@@ -1254,59 +1180,57 @@ class SmartSuggestionsChipCard extends HTMLElement {
 
     pop.querySelector("#pop-yaml").addEventListener("click", () => {
       SmartSuggestionsWS.send({ type: "build_yaml", entity_id: s.entity_id, action: s.action || "", name: s.name || s.entity_id, reason: s.reason || "" });
-      reportOutcome(SmartSuggestionsWS.ws, s.entity_id, s.action || "toggle", "saved", ({ high: 1.0, medium: 0.6, low: 0.3 }[s.confidence] ?? 0));
+      reportOutcome(SmartSuggestionsWS.ws, s.entity_id, s.action || "toggle", "saved", confScore(s));
       pop.remove();
     });
     pop.querySelector("#pop-dismiss").addEventListener("click", () => {
       this._dismissed.add(s.entity_id);
-      reportOutcome(SmartSuggestionsWS.ws, s.entity_id, s.action || "toggle", "dismissed", ({ high: 1.0, medium: 0.6, low: 0.3 }[s.confidence] ?? 0));
+      reportOutcome(SmartSuggestionsWS.ws, s.entity_id, s.action || "toggle", "dismissed", confScore(s));
       pop.remove();
       this._render();
     });
   }
+
+  getCardSize() { return 1; }
+
+  static getConfigElement() {
+    const el = document.createElement("smart-suggestions-card-editor");
+    el._cardType = "chip";
+    return el;
+  }
+
+  static getStubConfig() {
+    return { entity: "smart_suggestions.suggestions" };
+  }
 }
 
-class SmartSuggestionsTileCard extends HTMLElement {
-  constructor() {
-    super();
-    this.attachShadow({ mode: "open" });
-    this._config = {};
-    this._hass = null;
-    this._suggestions = [];
-    this._isRefreshing = false;
+// ── Tile Card ───────────────────────────────────────────────────
+
+class SmartSuggestionsTileCard extends SmartSuggestionsBaseCard {
+  _defaultConfig() {
+    return {
+      entity:        "smart_suggestions.suggestions",
+      title:         "Suggestions",
+      show_title:    true,
+      accent_color:  "#007AFF",
+      columns:       2,
+      max_visible:   6,
+      empty_message: "Thinking of suggestions…",
+    };
   }
 
   setConfig(config) {
-    this._config = {
-      title:        config.title !== undefined ? config.title : "Suggestions",
-      show_title:   config.show_title !== false,
-      accent_color: config.accent_color || "#007AFF",
-      columns:      Math.min(3, Math.max(2, parseInt(config.columns) || 2)),
-      max_visible:  parseInt(config.max_visible) || 6,
-      empty_message: config.empty_message || "Thinking of suggestions…",
-    };
-    SmartSuggestionsWS.setConfig(this._config);
-    requestAnimationFrame(() => this._render());
+    super.setConfig(config);
+    this._config.columns = Math.min(3, Math.max(2, parseInt(config.columns) || 2));
   }
-
-  connectedCallback() { SmartSuggestionsWS.register(this); }
-  disconnectedCallback() { SmartSuggestionsWS.unregister(this); }
-  set hass(hass) { this._hass = hass; }
-
-  _onWsUpdate(suggestions, isRefreshing) {
-    const max = this._config.max_visible;
-    this._suggestions = suggestions.slice(0, max);
-    this._isRefreshing = isRefreshing;
-    this._render();
-  }
-  _onWsMessage() {}
 
   _render() {
     if (!this._config) return;
-    const accent = this._config.accent_color;
+    const accent = this._config.accent_color || "#007AFF";
     const cols = this._config.columns;
+    const suggestions = this._getSuggestions();
 
-    const tiles = this._suggestions.map((s, i) => {
+    const tiles = suggestions.map((s, i) => {
       const domain = s.entity_id?.split(".")[0] || "scene";
       const icon = DOMAIN_ICONS[domain] || "mdi:star-circle";
       const borderColor = confidenceColor(s.confidence);
@@ -1347,14 +1271,14 @@ class SmartSuggestionsTileCard extends HTMLElement {
       <ha-card>
         <div class="card">
           ${this._config.show_title ? `<div class="title">${this._config.title}</div>` : ""}
-          ${this._isRefreshing || this._suggestions.length === 0
+          ${this._isRefreshing || suggestions.length === 0
             ? `<div class="empty">${this._isRefreshing ? "Thinking…" : this._config.empty_message}</div>`
             : `<div class="grid">${tiles}</div>`}
         </div>
       </ha-card>`;
 
     this.shadowRoot.querySelectorAll(".tile").forEach((tile, i) => {
-      const s = this._suggestions[i];
+      const s = suggestions[i];
       if (!s) return;
       tile.addEventListener("click", () => this._showSheet(s, tile));
     });
@@ -1363,9 +1287,9 @@ class SmartSuggestionsTileCard extends HTMLElement {
   _showSheet(s, tile) {
     const existing = this.shadowRoot.querySelector(".sheet-overlay");
     if (existing) existing.remove();
+    const accent = this._config.accent_color || "#007AFF";
     const overlay = document.createElement("div");
     overlay.className = "sheet-overlay";
-    const accent = this._config.accent_color;
     overlay.innerHTML = `
       <div class="sheet">
         <div class="sheet-name">${s.name || s.entity_id}</div>
@@ -1381,72 +1305,75 @@ class SmartSuggestionsTileCard extends HTMLElement {
     overlay.querySelector("#s-cancel").addEventListener("click", () => overlay.remove());
     overlay.querySelector("#s-run").addEventListener("click", async () => {
       overlay.remove();
-      if (!this._hass) return;
-      const domain = s.entity_id.split(".")[0];
-      const svc = s.action || (domain === "scene" ? "turn_on" : "toggle");
-      try { await this._hass.callService(domain, svc, { entity_id: s.entity_id }); } catch (_) {}
+      this._callService(s);
       tile.classList.add("flash");
       setTimeout(() => tile.classList.remove("flash"), 600);
-      reportOutcome(SmartSuggestionsWS.ws, s.entity_id, s.action || "toggle", "run", ({ high: 1.0, medium: 0.6, low: 0.3 }[s.confidence] ?? 0));
     });
     overlay.querySelector("#s-yaml").addEventListener("click", () => {
       overlay.remove();
       SmartSuggestionsWS.send({ type: "build_yaml", entity_id: s.entity_id, action: s.action || "", name: s.name || s.entity_id, reason: s.reason || "" });
-      reportOutcome(SmartSuggestionsWS.ws, s.entity_id, s.action || "toggle", "saved", ({ high: 1.0, medium: 0.6, low: 0.3 }[s.confidence] ?? 0));
+      reportOutcome(SmartSuggestionsWS.ws, s.entity_id, s.action || "toggle", "saved", confScore(s));
     });
     overlay.querySelector("#s-dismiss").addEventListener("click", () => {
       overlay.remove();
-      reportOutcome(SmartSuggestionsWS.ws, s.entity_id, s.action || "toggle", "dismissed", ({ high: 1.0, medium: 0.6, low: 0.3 }[s.confidence] ?? 0));
-      this._suggestions = this._suggestions.filter(x => x.entity_id !== s.entity_id);
+      reportOutcome(SmartSuggestionsWS.ws, s.entity_id, s.action || "toggle", "dismissed", confScore(s));
+      this._wsSuggestions = this._wsSuggestions.filter(x => x.entity_id !== s.entity_id);
       this._render();
     });
   }
+
+  getCardSize() { return 3; }
+
+  static getConfigElement() {
+    const el = document.createElement("smart-suggestions-card-editor");
+    el._cardType = "tile";
+    return el;
+  }
+
+  static getStubConfig() {
+    return { entity: "smart_suggestions.suggestions", columns: 2 };
+  }
 }
 
-class SmartSuggestionsGlanceCard extends HTMLElement {
+// ── Glance Card ─────────────────────────────────────────────────
+
+class SmartSuggestionsGlanceCard extends SmartSuggestionsBaseCard {
   constructor() {
     super();
-    this.attachShadow({ mode: "open" });
-    this._config = {};
-    this._hass = null;
-    this._suggestions = [];
     this._spotlightOverlay = null;
   }
 
-  setConfig(config) {
-    this._config = {
-      accent_color:  config.accent_color || "#007AFF",
-      show_reason:   config.show_reason === true,
-      on_tap:        config.on_tap || "navigate",
-      empty_message: config.empty_message || "No suggestions",
+  _defaultConfig() {
+    return {
+      entity:        "smart_suggestions.suggestions",
+      accent_color:  "#007AFF",
+      show_reason:   false,
+      on_tap:        "navigate",
+      empty_message: "No suggestions",
+      max_visible:   0,
     };
-    SmartSuggestionsWS.setConfig(this._config);
-    requestAnimationFrame(() => this._render());
   }
 
-  connectedCallback() { SmartSuggestionsWS.register(this); }
   disconnectedCallback() {
-    SmartSuggestionsWS.unregister(this);
+    super.disconnectedCallback();
     if (this._spotlightOverlay) {
       this._spotlightOverlay.remove();
       this._spotlightOverlay = null;
     }
   }
-  set hass(hass) { this._hass = hass; }
 
-  _onWsUpdate(suggestions) {
-    this._suggestions = suggestions;
-    this._render();
+  _onWsUpdate(suggestions, isRefreshing) {
+    super._onWsUpdate(suggestions, isRefreshing);
     if (this._spotlightOverlay) {
       this._spotlightOverlay._onWsUpdate(suggestions, false);
     }
   }
-  _onWsMessage() {}
 
   _render() {
     if (!this._config) return;
-    const accent = this._config.accent_color;
-    const s = this._suggestions[0];
+    const accent = this._config.accent_color || "#007AFF";
+    const suggestions = this._getSuggestions();
+    const s = suggestions[0];
     const domain = s?.entity_id?.split(".")[0];
     const icon = s ? (DOMAIN_ICONS[domain] || "mdi:star-circle") : "mdi:star-circle";
 
@@ -1478,7 +1405,7 @@ class SmartSuggestionsGlanceCard extends HTMLElement {
         if (e.target.closest("#run-btn")) return;
         const tap = this._config.on_tap;
         if (tap === "more-info") {
-          this.dispatchEvent(new CustomEvent("hass-more-info", { bubbles: true, composed: true, detail: { entityId: s.entity_id } }));
+          this._showMoreInfo(s.entity_id);
         } else if (tap === "spotlight") {
           if (this._spotlightOverlay) {
             this._spotlightOverlay.remove();
@@ -1500,55 +1427,56 @@ class SmartSuggestionsGlanceCard extends HTMLElement {
       });
       this.shadowRoot.querySelector("#run-btn").addEventListener("click", async e => {
         e.stopPropagation();
-        if (!this._hass) return;
-        const domain = s.entity_id.split(".")[0];
-        const svc = s.action || (domain === "scene" ? "turn_on" : "toggle");
-        try { await this._hass.callService(domain, svc, { entity_id: s.entity_id }); } catch (_) {}
-        reportOutcome(SmartSuggestionsWS.ws, s.entity_id, s.action || "toggle", "run", ({ high: 1.0, medium: 0.6, low: 0.3 }[s.confidence] ?? 0));
+        this._callService(s);
       });
     }
   }
+
+  getCardSize() { return 1; }
+
+  static getConfigElement() {
+    const el = document.createElement("smart-suggestions-card-editor");
+    el._cardType = "glance";
+    return el;
+  }
+
+  static getStubConfig() {
+    return { entity: "smart_suggestions.suggestions" };
+  }
 }
 
-class SmartSuggestionsBannerCard extends HTMLElement {
+// ── Banner Card ─────────────────────────────────────────────────
+
+class SmartSuggestionsBannerCard extends SmartSuggestionsBaseCard {
   constructor() {
     super();
-    this.attachShadow({ mode: "open" });
-    this._config = {};
-    this._hass = null;
-    this._suggestions = [];
     this._dismissed = false;
   }
 
-  setConfig(config) {
-    this._config = {
-      accent_color: config.accent_color || "#007AFF",
-      show_title:   config.show_title === true,
-      title:        config.title || "",
+  _defaultConfig() {
+    return {
+      entity:       "smart_suggestions.suggestions",
+      accent_color: "#007AFF",
+      show_title:   false,
+      title:        "",
+      max_visible:  0,
     };
-    SmartSuggestionsWS.setConfig(this._config);
-    requestAnimationFrame(() => this._render());
   }
 
-  connectedCallback() { SmartSuggestionsWS.register(this); }
-  disconnectedCallback() { SmartSuggestionsWS.unregister(this); }
-  set hass(hass) { this._hass = hass; }
-
-  _onWsUpdate(suggestions) {
+  _onWsUpdate(suggestions, isRefreshing) {
     const newFirst = suggestions[0]?.entity_id;
-    const oldFirst = this._suggestions[0]?.entity_id;
+    const oldFirst = this._wsSuggestions[0]?.entity_id;
     if (newFirst !== oldFirst) {
       this._dismissed = false;
     }
-    this._suggestions = suggestions;
-    this._render();
+    super._onWsUpdate(suggestions, isRefreshing);
   }
-  _onWsMessage() {}
 
   _render() {
     if (!this._config) return;
-    const accent = this._config.accent_color;
-    const s = this._suggestions[0];
+    const accent = this._config.accent_color || "#007AFF";
+    const suggestions = this._getSuggestions();
+    const s = suggestions[0];
     const visible = s && confidenceVisible(s.confidence) && !this._dismissed;
 
     if (!visible) {
@@ -1577,26 +1505,34 @@ class SmartSuggestionsBannerCard extends HTMLElement {
       </div>`;
 
     this.shadowRoot.querySelector("#reason").addEventListener("click", () => {
-      this.dispatchEvent(new CustomEvent("hass-more-info", { bubbles: true, composed: true, detail: { entityId: s.entity_id } }));
+      this._showMoreInfo(s.entity_id);
     });
     this.shadowRoot.querySelector("#run-btn").addEventListener("click", async () => {
-      if (!this._hass) return;
-      const domain = s.entity_id.split(".")[0];
-      const svc = s.action || (domain === "scene" ? "turn_on" : "toggle");
-      try { await this._hass.callService(domain, svc, { entity_id: s.entity_id }); } catch (_) {}
-      reportOutcome(SmartSuggestionsWS.ws, s.entity_id, s.action || "toggle", "run", ({ high: 1.0, medium: 0.6, low: 0.3 }[s.confidence] ?? 0));
+      this._callService(s);
       this._dismissed = true;
       this._render();
     });
     this.shadowRoot.querySelector("#dismiss-btn").addEventListener("click", () => {
-      reportOutcome(SmartSuggestionsWS.ws, s.entity_id, s.action || "toggle", "dismissed", ({ high: 1.0, medium: 0.6, low: 0.3 }[s.confidence] ?? 0));
+      reportOutcome(SmartSuggestionsWS.ws, s.entity_id, s.action || "toggle", "dismissed", confScore(s));
       this._dismissed = true;
       this._render();
     });
   }
+
+  getCardSize() { return 1; }
+
+  static getConfigElement() {
+    const el = document.createElement("smart-suggestions-card-editor");
+    el._cardType = "banner";
+    return el;
+  }
+
+  static getStubConfig() {
+    return { entity: "smart_suggestions.suggestions" };
+  }
 }
 
-customElements.define("smart-suggestions-card", SmartSuggestionsCard);
+// ── Shared Config Editor ────────────────────────────────────────
 
 class SmartSuggestionsCardEditor extends HTMLElement {
   constructor() {
@@ -1605,10 +1541,13 @@ class SmartSuggestionsCardEditor extends HTMLElement {
     this._config = {};
     this._hass = null;
     this._domBuilt = false;
+    this._cardType = "main"; // set by getConfigElement()
   }
 
   setConfig(config) {
     this._config = { ...config };
+    // Detect card type from config context if not already set externally
+    if (config._cardType) this._cardType = config._cardType;
     this._render();
   }
 
@@ -1617,7 +1556,6 @@ class SmartSuggestionsCardEditor extends HTMLElement {
     if (!this._domBuilt && Object.keys(this._config).length) {
       this._render();
     } else {
-      // Just update the entity picker in-place — never re-build DOM here
       const picker = this.shadowRoot?.querySelector("ha-entity-picker");
       if (picker) picker.hass = hass;
     }
@@ -1628,13 +1566,11 @@ class SmartSuggestionsCardEditor extends HTMLElement {
   }
 
   _setValue(key, value) {
-    // No-op guard: prevents picker re-fire loops and unnecessary config-changed events
     if (this._config[key] === value) return;
     this._config = { ...this._config, [key]: value };
     this._fire(this._config);
   }
 
-  // Returns true if el or any descendant within the shadow root is focused
   _hasFocus(el) {
     if (!el) return false;
     const active = this.shadowRoot.activeElement;
@@ -1651,6 +1587,16 @@ class SmartSuggestionsCardEditor extends HTMLElement {
   }
 
   _buildDOM() {
+    const t = this._cardType;
+    const isMain = t === "main";
+    const isTile = t === "tile";
+    const isGlance = t === "glance";
+
+    // All cards get entity, title, show_title, accent_color, max_visible, empty_message
+    // Main adds: icon, show_refresh, show_last_updated, show_section_headers, show_feedback, compact, tap_action
+    // Tile adds: columns
+    // Glance adds: show_reason, on_tap
+
     this.shadowRoot.innerHTML = `
       <style>
         .editor { display: flex; flex-direction: column; gap: 16px; padding: 4px 0; }
@@ -1661,7 +1607,6 @@ class SmartSuggestionsCardEditor extends HTMLElement {
         .native-select { width:100%; background:var(--input-fill-color,rgba(0,0,0,0.06)); color:var(--primary-text-color,#fff); border:1px solid var(--divider-color,rgba(0,0,0,0.12)); border-radius:4px; padding:10px 12px; font-size:14px; outline:none; cursor:pointer; }
         .toggle-row { display: flex; align-items: center; justify-content: space-between; height: 40px; }
         .toggle-label { font-size: 14px; color: var(--primary-text-color); }
-        .toggle-hint { font-size: 12px; color: var(--secondary-text-color); margin-top: 1px; }
         .color-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
         .color-row label { font-size: 14px; color: var(--primary-text-color); flex: 1; }
         .color-row input[type="color"] { width: 44px; height: 32px; border: 1px solid var(--divider-color); border-radius: 8px; padding: 2px; cursor: pointer; background: none; }
@@ -1673,11 +1618,12 @@ class SmartSuggestionsCardEditor extends HTMLElement {
 
         <div class="section-title">Display</div>
         <ha-textfield id="title" label="Card title"></ha-textfield>
-        <ha-icon-picker id="icon" label="Header icon"></ha-icon-picker>
+        ${isMain ? `<ha-icon-picker id="icon" label="Header icon"></ha-icon-picker>` : ""}
         <div class="toggle-row">
           <span class="toggle-label">Show title bar</span>
           <ha-switch id="show_title"></ha-switch>
         </div>
+        ${isMain ? `
         <div class="toggle-row">
           <span class="toggle-label">Show refresh button</span>
           <ha-switch id="show_refresh"></ha-switch>
@@ -1697,7 +1643,12 @@ class SmartSuggestionsCardEditor extends HTMLElement {
         <div class="toggle-row">
           <span class="toggle-label">Compact rows</span>
           <ha-switch id="compact"></ha-switch>
-        </div>
+        </div>` : ""}
+        ${isGlance ? `
+        <div class="toggle-row">
+          <span class="toggle-label">Show reason text</span>
+          <ha-switch id="show_reason"></ha-switch>
+        </div>` : ""}
         <ha-textfield id="empty_message" label="Empty state message"></ha-textfield>
         <div class="color-row">
           <label>Accent colour</label>
@@ -1706,6 +1657,7 @@ class SmartSuggestionsCardEditor extends HTMLElement {
         </div>
 
         <div class="section-title">Behaviour</div>
+        ${isMain ? `
         <div class="native-select-wrap">
           <label class="native-select-label">Tap action</label>
           <select id="tap_action" class="native-select">
@@ -1713,7 +1665,24 @@ class SmartSuggestionsCardEditor extends HTMLElement {
             <option value="more-info">More info (open entity dialog)</option>
             <option value="expand">Expand (show reason only)</option>
           </select>
-        </div>
+        </div>` : ""}
+        ${isGlance ? `
+        <div class="native-select-wrap">
+          <label class="native-select-label">Tap action</label>
+          <select id="on_tap" class="native-select">
+            <option value="navigate">Navigate</option>
+            <option value="more-info">More info</option>
+            <option value="spotlight">Spotlight overlay</option>
+          </select>
+        </div>` : ""}
+        ${isTile ? `
+        <div class="native-select-wrap">
+          <label class="native-select-label">Columns</label>
+          <select id="columns" class="native-select">
+            <option value="2">2 columns</option>
+            <option value="3">3 columns</option>
+          </select>
+        </div>` : ""}
         <ha-textfield id="max_visible" label="Max suggestions to show (0 = all)" type="number" min="0" max="20"></ha-textfield>
       </div>
     `;
@@ -1729,7 +1698,6 @@ class SmartSuggestionsCardEditor extends HTMLElement {
       entity.value = c.entity || "smart_suggestions.suggestions";
     }
 
-    // Only update text fields if they don't have focus (user may be mid-type)
     const title = q("title");
     if (title && !this._hasFocus(title)) {
       title.value = c.title !== undefined ? c.title : "Suggested for You";
@@ -1745,7 +1713,7 @@ class SmartSuggestionsCardEditor extends HTMLElement {
       empty.value = c.empty_message || "Thinking of suggestions…";
     }
 
-    for (const key of ["show_title", "show_refresh", "show_last_updated", "show_section_headers", "show_feedback"]) {
+    for (const key of ["show_title", "show_refresh", "show_last_updated", "show_section_headers", "show_feedback", "show_reason"]) {
       const el = q(key);
       if (el) el.checked = c[key] !== false;
     }
@@ -1757,8 +1725,12 @@ class SmartSuggestionsCardEditor extends HTMLElement {
 
     const tapAction = q("tap_action");
     if (tapAction && !this._hasFocus(tapAction)) tapAction.value = c.tap_action || "execute";
-    // Ensure the option exists before setting (native select silently ignores unknown values)
 
+    const onTap = q("on_tap");
+    if (onTap && !this._hasFocus(onTap)) onTap.value = c.on_tap || "navigate";
+
+    const columns = q("columns");
+    if (columns && !this._hasFocus(columns)) columns.value = String(c.columns || 2);
 
     const maxVisible = q("max_visible");
     if (maxVisible && !this._hasFocus(maxVisible)) maxVisible.value = c.max_visible ?? 0;
@@ -1772,7 +1744,7 @@ class SmartSuggestionsCardEditor extends HTMLElement {
     q("icon")?.addEventListener("value-changed", (e) => this._setValue("icon", e.detail.value));
     q("empty_message")?.addEventListener("input", (e) => this._setValue("empty_message", e.target.value));
 
-    for (const key of ["show_title", "show_refresh", "show_last_updated", "show_section_headers", "show_feedback", "compact"]) {
+    for (const key of ["show_title", "show_refresh", "show_last_updated", "show_section_headers", "show_feedback", "compact", "show_reason"]) {
       q(key)?.addEventListener("change", (e) => this._setValue(key, e.target.checked));
     }
 
@@ -1785,6 +1757,8 @@ class SmartSuggestionsCardEditor extends HTMLElement {
     });
 
     q("tap_action")?.addEventListener("change", (e) => this._setValue("tap_action", e.target.value));
+    q("on_tap")?.addEventListener("change", (e) => this._setValue("on_tap", e.target.value));
+    q("columns")?.addEventListener("change", (e) => this._setValue("columns", parseInt(e.target.value)));
 
     q("max_visible")?.addEventListener("input", (e) => {
       const v = parseInt(e.target.value);
@@ -1793,27 +1767,32 @@ class SmartSuggestionsCardEditor extends HTMLElement {
   }
 }
 
-customElements.define("smart-suggestions-card-editor", SmartSuggestionsCardEditor);
+// ── Register all elements ───────────────────────────────────────
 
+customElements.define("smart-suggestions-card", SmartSuggestionsCard);
+customElements.define("smart-suggestions-card-editor", SmartSuggestionsCardEditor);
 customElements.define("smart-suggestions-spotlight-card", SmartSuggestionsSpotlightCard);
 customElements.define("smart-suggestions-chip-card", SmartSuggestionsChipCard);
 customElements.define("smart-suggestions-tile-card", SmartSuggestionsTileCard);
 customElements.define("smart-suggestions-glance-card", SmartSuggestionsGlanceCard);
 customElements.define("smart-suggestions-banner-card", SmartSuggestionsBannerCard);
 
-window.customCards = window.customCards || [];
-window.customCards.push({
-  type: "smart-suggestions-card",
-  name: "Smart Suggestions",
-  description: "AI-powered contextual suggestions via Ollama",
-  preview: false,
-});
+// ── Card picker registration ────────────────────────────────────
 
-["smart-suggestions-spotlight-card", "smart-suggestions-chip-card",
- "smart-suggestions-tile-card", "smart-suggestions-glance-card",
- "smart-suggestions-banner-card"].forEach(name => {
-  if (!window.customCards.find(c => c.type === name)) {
-    window.customCards.push({ type: name, name: name.replace(/-/g, " ").replace(/\b\w/g, c => c.toUpperCase()), preview: false });
+window.customCards = window.customCards || [];
+
+const CARD_DEFS = [
+  { type: "smart-suggestions-card",           name: "Smart Suggestions",            description: "AI-powered contextual suggestions — full list view" },
+  { type: "smart-suggestions-spotlight-card",  name: "Smart Suggestions Spotlight",  description: "Full-screen carousel of suggestions" },
+  { type: "smart-suggestions-chip-card",       name: "Smart Suggestions Chips",      description: "Horizontal scrolling chip bar" },
+  { type: "smart-suggestions-tile-card",       name: "Smart Suggestions Tiles",      description: "Grid of suggestion tiles" },
+  { type: "smart-suggestions-glance-card",     name: "Smart Suggestions Glance",     description: "Single-row at-a-glance suggestion" },
+  { type: "smart-suggestions-banner-card",     name: "Smart Suggestions Banner",     description: "Minimal dismissible banner" },
+];
+
+CARD_DEFS.forEach(def => {
+  if (!window.customCards.find(c => c.type === def.type)) {
+    window.customCards.push({ ...def, preview: false });
   }
 });
 

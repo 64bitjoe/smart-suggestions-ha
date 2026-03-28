@@ -4,7 +4,7 @@
  * Drop in /config/www/smart-suggestions-card.js
  */
 
-const CARD_VERSION = "1.2.0";
+const CARD_VERSION = "2.0.0";
 
 const DOMAIN_ICONS = {
   light: "mdi:lightbulb",
@@ -220,6 +220,10 @@ class SmartSuggestionsCard extends HTMLElement {
   _onWsUpdate(suggestions, isRefreshing) {
     this._wsSuggestions = suggestions;
     this._isRefreshing = isRefreshing;
+    if (!isRefreshing && this._refreshTimeout) {
+      clearTimeout(this._refreshTimeout);
+      this._refreshTimeout = null;
+    }
     this._render();
   }
 
@@ -416,11 +420,14 @@ class SmartSuggestionsCard extends HTMLElement {
     if (this._isRefreshing) return;
     this._isRefreshing = true;
     this._render();
-    // The add-on drives its own refresh cycle — just show a brief spin
-    setTimeout(() => {
+    // Send refresh_all to add-on via WebSocket for full pipeline refresh
+    SmartSuggestionsWS.send({ type: "refresh_all" });
+    this._showToast("Refreshing everything…");
+    // Fallback timeout in case we don't get a status update
+    this._refreshTimeout = setTimeout(() => {
       this._isRefreshing = false;
       this._render();
-    }, 3000);
+    }, 30000);
   }
 
   _toggleExpand(index) {

@@ -3,7 +3,7 @@
  * AI-powered contextual action suggestions for Home Assistant
  */
 
-const CARD_VERSION = "2.1.0";
+const CARD_VERSION = "2.2.0";
 
 const DOMAIN_ICONS = {
   light: "mdi:lightbulb",
@@ -64,6 +64,30 @@ function getAddonWsUrl(config) {
 
 function confScore(s) {
   return ({ high: 1.0, medium: 0.6, low: 0.3 }[s?.confidence] ?? 0);
+}
+
+function stateColor(state) {
+  if (!state) return "#8E8E93";
+  const s = state.toLowerCase();
+  if (["on","open","unlocked","playing","home","cleaning"].includes(s)) return "#34C759";
+  if (["off","closed","locked","idle","paused","standby"].includes(s)) return "#78909C";
+  if (["error","unavailable"].includes(s)) return "#FF3B30";
+  return "#FF9F0A";
+}
+
+function actionLabel(action) {
+  return { activate:"Activate", trigger:"Trigger", turn_on:"Turn On", turn_off:"Turn Off", lock:"Lock", unlock:"Unlock", open_cover:"Open", close_cover:"Close", toggle:"Toggle" }[action] || action || "";
+}
+
+function stateTransitionHtml(s) {
+  const cur = s.current_state || s.state || "";
+  const act = s.action || "";
+  if (!cur && !act) return "";
+  return `<span style="display:inline-flex;align-items:center;gap:4px;font-size:11px;margin-top:2px;">
+    <span style="display:inline-block;padding:1px 6px;border-radius:8px;font-weight:600;text-transform:uppercase;letter-spacing:0.3px;background:${stateColor(cur)};color:#fff;font-size:10px;">${cur || "?"}</span>
+    <span style="color:var(--secondary-text-color,#8E8E93);">→</span>
+    <span style="display:inline-block;padding:1px 6px;border-radius:8px;font-weight:600;text-transform:uppercase;letter-spacing:0.3px;background:#007AFF;color:#fff;font-size:10px;">${actionLabel(act)}</span>
+  </span>`;
 }
 
 // ── Shared WebSocket Singleton ──────────────────────────────────
@@ -708,13 +732,13 @@ class SmartSuggestionsCard extends SmartSuggestionsBaseCard {
         const picture = this._resolveEntityPicture(s);
         const domain = s.entity_id?.split(".")[0] || "";
         const iconColor = isScene ? DOMAIN_COLORS["scene"] : (DOMAIN_COLORS[domain] || "#8E8E93");
-        const actionLabel = this._getActionLabel(s.action);
+        const actionLbl = this._getActionLabel(s.action);
         const isExpanded = this._expandedIndex === i;
-        let subText = actionLabel;
+        let subText = actionLbl;
         if (s.entity_id && this._hass) {
           const st = this._hass.states[s.entity_id];
           if (st && domain !== "automation" && domain !== "script" && domain !== "scene") {
-            subText = `${actionLabel} · ${st.state}`;
+            subText = `${actionLbl} · ${st.state}`;
           }
         }
         const iconInner = picture
@@ -745,7 +769,7 @@ class SmartSuggestionsCard extends SmartSuggestionsBaseCard {
               </div>
               <div class="row-text">
                 <div class="row-name">${s.name || s.entity_id}</div>
-                <div class="row-sub">${subText}</div>
+                <div class="row-sub">${stateTransitionHtml(s) || subText}</div>
                 ${confidenceLabel(s)}
               </div>
               ${feedbackHtml}
@@ -977,6 +1001,7 @@ class SmartSuggestionsSpotlightCard extends SmartSuggestionsBaseCard {
         .icon-circle { width: 64px; height: 64px; border-radius: 20px; background: ${color}; display: flex; align-items: center; justify-content: center; margin: 0 auto 14px; }
         .icon-circle ha-icon { --mdc-icon-size: 32px; color: #fff; }
         .name { font-size: 20px; font-weight: 600; color: var(--primary-text-color, #fff); margin-bottom: 6px; }
+        .transition { margin-bottom: 8px; display: flex; justify-content: center; }
         .reason { font-size: 14px; color: var(--secondary-text-color, #8E8E93); line-height: 1.5; margin-bottom: 12px; padding: 0 10px; }
         .badge { display: inline-block; font-size: 10px; font-weight: 700; text-transform: uppercase; padding: 2px 8px; border-radius: 20px; background: ${confCol}22; color: ${confCol}; margin-bottom: 18px; }
         .actions { display: flex; gap: 8px; justify-content: center; margin-bottom: 16px; }
@@ -1000,6 +1025,7 @@ class SmartSuggestionsSpotlightCard extends SmartSuggestionsBaseCard {
           ${this._config.show_title ? `<div class="title">${this._config.title}</div>` : ""}
           <div class="icon-circle"><ha-icon icon="${icon}"></ha-icon></div>
           <div class="name">${s.name || s.entity_id}</div>
+          <div class="transition">${stateTransitionHtml(s)}</div>
           <div class="reason">${s.reason || ""}</div>
           <div class="badge">${s.confidence || "low"}</div>
           <div class="actions">
@@ -1168,6 +1194,7 @@ class SmartSuggestionsChipCard extends SmartSuggestionsBaseCard {
     const pop = document.createElement("div");
     pop.className = "popover";
     pop.innerHTML = `
+      <div style="margin-bottom:6px;">${stateTransitionHtml(s)}</div>
       <div class="pop-reason">${s.reason || "No reason provided."}</div>
       <button class="pop-btn" id="pop-yaml">Save as Automation</button>
       <button class="pop-btn dismiss" id="pop-dismiss">Dismiss</button>`;
@@ -1234,9 +1261,11 @@ class SmartSuggestionsTileCard extends SmartSuggestionsBaseCard {
       const domain = s.entity_id?.split(".")[0] || "scene";
       const icon = DOMAIN_ICONS[domain] || "mdi:star-circle";
       const borderColor = confidenceColor(s.confidence);
+      const cur = s.current_state || "";
       return `<div class="tile" data-index="${i}" style="border-color:${borderColor}">
         <ha-icon icon="${icon}" style="--mdc-icon-size:36px;color:${borderColor}"></ha-icon>
         <div class="tile-name">${(s.name || s.entity_id || "").substring(0, 20)}</div>
+        ${cur ? `<div class="tile-state" style="color:${stateColor(cur)}">${cur}</div>` : ""}
         <div class="tile-badge ${s.confidence || 'low'}">${s.confidence || "low"}</div>
       </div>`;
     }).join("");
@@ -1253,6 +1282,7 @@ class SmartSuggestionsTileCard extends SmartSuggestionsBaseCard {
         .tile.flash { animation: tile-flash 0.5s ease; }
         @keyframes tile-flash { 0%,100% { background: rgba(255,255,255,0.07); } 50% { background: rgba(52,199,89,0.15); } }
         .tile-name { font-size: 12px; color: var(--primary-text-color, #fff); text-align: center; line-height: 1.3; }
+        .tile-state { font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.3px; }
         .tile-badge { font-size: 10px; font-weight: 700; text-transform: uppercase; padding: 1px 6px; border-radius: 20px; }
         .tile-badge.high { background: rgba(52,199,89,0.15); color: #34C759; }
         .tile-badge.medium { background: rgba(255,159,10,0.15); color: #FF9F0A; }
@@ -1293,6 +1323,7 @@ class SmartSuggestionsTileCard extends SmartSuggestionsBaseCard {
     overlay.innerHTML = `
       <div class="sheet">
         <div class="sheet-name">${s.name || s.entity_id}</div>
+        <div style="margin-bottom:8px;">${stateTransitionHtml(s)}</div>
         <div class="sheet-reason">${s.reason || ""}</div>
         <button class="sheet-btn sheet-run" id="s-run">Run Now</button>
         <button class="sheet-btn sheet-yaml" id="s-yaml">Save as Automation</button>
@@ -1395,7 +1426,7 @@ class SmartSuggestionsGlanceCard extends SmartSuggestionsBaseCard {
           <ha-icon icon="${icon}"></ha-icon>
           <div class="text">
             <div class="name">${s.name || s.entity_id}</div>
-            ${this._config.show_reason ? `<div class="reason">${s.reason || ""}</div>` : ""}
+            ${this._config.show_reason ? `<div class="reason">${stateTransitionHtml(s)} ${s.reason || ""}</div>` : ""}
           </div>
           <button class="run-btn" id="run-btn">Run</button>
         </div>` : `<div class="empty">${this._config.empty_message}</div>`}`;
@@ -1499,7 +1530,7 @@ class SmartSuggestionsBannerCard extends SmartSuggestionsBaseCard {
       </style>
       <div class="banner">
         <ha-icon icon="${icon}"></ha-icon>
-        <div class="reason" id="reason">${s.reason || s.name || s.entity_id}</div>
+        <div class="reason" id="reason">${stateTransitionHtml(s)} ${s.reason || s.name || s.entity_id}</div>
         <button class="run-btn" id="run-btn">Run</button>
         <button class="dismiss-btn" id="dismiss-btn">&times;</button>
       </div>`;
@@ -1615,6 +1646,7 @@ class SmartSuggestionsCardEditor extends HTMLElement {
       <div class="editor">
         <div class="section-title">Data</div>
         <ha-entity-picker id="entity" label="Suggestions entity" allow-custom-entity></ha-entity-picker>
+        <ha-textfield id="addon_url" label="Add-on URL (optional, auto-detected)" placeholder="http://homeassistant.local:8099"></ha-textfield>
 
         <div class="section-title">Display</div>
         <ha-textfield id="title" label="Card title"></ha-textfield>
@@ -1698,6 +1730,11 @@ class SmartSuggestionsCardEditor extends HTMLElement {
       entity.value = c.entity || "smart_suggestions.suggestions";
     }
 
+    const addonUrl = q("addon_url");
+    if (addonUrl && !this._hasFocus(addonUrl)) {
+      addonUrl.value = c.addon_url || "";
+    }
+
     const title = q("title");
     if (title && !this._hasFocus(title)) {
       title.value = c.title !== undefined ? c.title : "Suggested for You";
@@ -1740,6 +1777,7 @@ class SmartSuggestionsCardEditor extends HTMLElement {
     const q = (id) => this.shadowRoot.querySelector(`#${id}`);
 
     q("entity")?.addEventListener("value-changed", (e) => this._setValue("entity", e.detail.value));
+    q("addon_url")?.addEventListener("input", (e) => this._setValue("addon_url", e.target.value || null));
     q("title")?.addEventListener("input", (e) => this._setValue("title", e.target.value));
     q("icon")?.addEventListener("value-changed", (e) => this._setValue("icon", e.detail.value));
     q("empty_message")?.addEventListener("input", (e) => this._setValue("empty_message", e.target.value));
@@ -1792,7 +1830,7 @@ const CARD_DEFS = [
 
 CARD_DEFS.forEach(def => {
   if (!window.customCards.find(c => c.type === def.type)) {
-    window.customCards.push({ ...def, preview: false });
+    window.customCards.push({ ...def, preview: false, configurable: true });
   }
 });
 

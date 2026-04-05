@@ -628,8 +628,9 @@ class SmartSuggestionsCard extends SmartSuggestionsBaseCard {
       .info-btn:active, .info-btn.active { opacity: 1; }
       .info-btn ha-icon { --mdc-icon-size: 19px; }
       .reason-panel { overflow: hidden; max-height: 0; transition: max-height 0.28s cubic-bezier(0.4,0,0.2,1); }
-      .reason-panel.open { max-height: 220px; }
+      .reason-panel.open { max-height: 220px; overflow-y: auto; }
       .reason-inner { padding: 8px 14px 13px 62px; font-size: 13px; line-height: 1.55; color: var(--secondary-text-color, #8E8E93); border-top: 0.5px solid rgba(255,255,255,0.07); }
+      .reason-inner .reason-text { display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden; }
       .get-yaml-btn { margin-top: 8px; background: none; border: 1px solid ${accent}; color: ${accent}; border-radius: 6px; padding: 4px 10px; font-size: 12px; cursor: pointer; -webkit-tap-highlight-color: transparent; }
       .get-yaml-btn.loading { opacity: 0.5; pointer-events: none; }
       .row.flash .row-main { animation: flash-row 0.6s ease; }
@@ -780,7 +781,7 @@ class SmartSuggestionsCard extends SmartSuggestionsBaseCard {
             ${saveAutomationHtml}
             <div class="reason-panel ${isExpanded ? "open" : ""}">
               <div class="reason-inner">
-                ${s.reason || "No reason provided."}
+                <div class="reason-text">${s.reason || "No reason provided."}</div>
                 <br>${(() => { const yamlPending = this._pendingYamlEid === s.entity_id; return `<button class="get-yaml-btn${yamlPending ? ' loading' : ''}" data-eid="${this._escapeHtml(s.entity_id || "")}" data-action="${this._escapeHtml(s.action || "")}">${yamlPending ? 'Building…' : 'Get Automation YAML'}</button>`; })()}
               </div>
             </div>

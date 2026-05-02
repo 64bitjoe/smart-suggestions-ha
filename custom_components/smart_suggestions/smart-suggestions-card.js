@@ -3,7 +3,7 @@
  * AI-powered contextual action suggestions for Home Assistant
  */
 
-const CARD_VERSION = "2.2.0";
+const CARD_VERSION = "3.0.0";
 
 const DOMAIN_ICONS = {
   light: "mdi:lightbulb",
@@ -561,6 +561,18 @@ class SmartSuggestionsCard extends SmartSuggestionsBaseCard {
     } catch (e) { console.warn("[SmartSuggestions] Feedback failed:", e); }
   }
 
+  async _turnOff(entityId) {
+    if (!this._hass || !entityId) return;
+    const domain = entityId.split(".")[0];
+    try {
+      await this._hass.callService(domain, "turn_off", { entity_id: entityId });
+      this._flashRow(entityId);
+      reportOutcome(SmartSuggestionsWS.ws, entityId, "turn_off", "run", 1.0);
+    } catch (e) {
+      console.error("[SmartSuggestions] Turn off failed:", e);
+    }
+  }
+
   _getActionLabel(action) {
     return { turn_on: "Turn On", turn_off: "Turn Off", toggle: "Toggle", trigger: "Trigger", navigate: "Go To" }[action] || action;
   }
@@ -633,6 +645,8 @@ class SmartSuggestionsCard extends SmartSuggestionsBaseCard {
       .reason-inner .reason-text { display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden; }
       .get-yaml-btn { margin-top: 8px; background: none; border: 1px solid ${accent}; color: ${accent}; border-radius: 6px; padding: 4px 10px; font-size: 12px; cursor: pointer; -webkit-tap-highlight-color: transparent; }
       .get-yaml-btn.loading { opacity: 0.5; pointer-events: none; }
+      .turn-off-btn { margin-top: 8px; margin-right: 6px; background: none; border: 1px solid #f9a825; color: #f9a825; border-radius: 6px; padding: 4px 10px; font-size: 12px; cursor: pointer; -webkit-tap-highlight-color: transparent; }
+      .turn-off-btn:active { background: rgba(249,168,37,0.12); }
       .row.flash .row-main { animation: flash-row 0.6s ease; }
       @keyframes flash-row { 0% { background: rgba(52,199,89,0); } 25% { background: rgba(52,199,89,0.14); } 100% { background: rgba(52,199,89,0); } }
       .row-main.compact { padding: 6px 10px 6px 12px; min-height: 44px; gap: 10px; }
@@ -679,6 +693,14 @@ class SmartSuggestionsCard extends SmartSuggestionsBaseCard {
       .skel-line { height: 11px; border-radius: 6px; background: rgba(255,255,255,0.1); animation: shimmer 1.4s ease-in-out infinite; margin-bottom: 7px; }
       .skel-line.short { width: 55%; margin-bottom: 0; }
       @keyframes shimmer { 0%,100% { opacity: 0.35; } 50% { opacity: 0.65; } }
+      .zone { margin-bottom: 2px; }
+      .zone-header { font-size: 0.85em; text-transform: uppercase; letter-spacing: 0.05em; color: var(--secondary-text-color, #8E8E93); padding: 8px 12px 4px; font-weight: 700; display: flex; align-items: center; gap: 6px; }
+      .zone-icon { font-size: 10px; line-height: 1; }
+      .zone-suggestions .zone-icon { color: #4caf50; }
+      .zone-noticed .zone-icon { color: #f9a825; }
+      .zone-suggestions .list-wrap { border-left: 3px solid #4caf50; border-radius: 0 12px 12px 0; }
+      .zone-noticed .list-wrap { border-left: 3px solid #f9a825; border-radius: 0 12px 12px 0; }
+      .zone-divider { height: 0.5px; background: rgba(255,255,255,0.07); margin: 4px 12px; }
     `;
 
     const subtitleHtml = isUpdating
@@ -728,7 +750,7 @@ class SmartSuggestionsCard extends SmartSuggestionsBaseCard {
         return `<span class="confidence-label ${level}">${text}</span>`;
       };
 
-      const makeRow = (s, i, isScene) => {
+      const makeRow = (s, i, isScene, zoneKind) => {
         const icon = this._resolveIcon(s);
         const picture = this._resolveEntityPicture(s);
         const domain = s.entity_id?.split(".")[0] || "";
@@ -762,6 +784,11 @@ class SmartSuggestionsCard extends SmartSuggestionsBaseCard {
             <ha-icon icon="mdi:robot-outline"></ha-icon> Save as Automation
           </button>` : "";
 
+        const isNoticed = zoneKind === "noticed";
+        const primaryActionHtml = isNoticed
+          ? `<button class="turn-off-btn" data-turn-off-eid="${this._escapeHtml(s.entity_id || "")}">Turn Off</button>`
+          : ``;
+
         return `
           <div class="row" data-entity="${s.entity_id || ""}" data-index="${i}">
             <div class="row-main${compactClass}" data-action="${i}">
@@ -782,40 +809,70 @@ class SmartSuggestionsCard extends SmartSuggestionsBaseCard {
             <div class="reason-panel ${isExpanded ? "open" : ""}">
               <div class="reason-inner">
                 <div class="reason-text">${s.reason || "No reason provided."}</div>
-                <br>${(() => { const yamlPending = this._pendingYamlEid === s.entity_id; return `<button class="get-yaml-btn${yamlPending ? ' loading' : ''}" data-eid="${this._escapeHtml(s.entity_id || "")}" data-action="${this._escapeHtml(s.action || "")}">${yamlPending ? 'Building…' : 'Get Automation YAML'}</button>`; })()}
+                <br>${primaryActionHtml}${(() => { const yamlPending = this._pendingYamlEid === s.entity_id; return `<button class="get-yaml-btn${yamlPending ? ' loading' : ''}" data-eid="${this._escapeHtml(s.entity_id || "")}" data-action="${this._escapeHtml(s.action || "")}">${yamlPending ? 'Building…' : 'Get Automation YAML'}</button>`; })()}
               </div>
             </div>
           </div>
         `;
       };
 
-      const buckets = { scene: [], suggested: [], stretch: [] };
-      suggestions.forEach((s, i) => {
-        const domain = s.entity_id?.split(".")[0] || "";
-        const isSceneType = s.type === "scene" || domain === "scene";
-        const key = (s.section && buckets[s.section] !== undefined)
-          ? s.section
-          : isSceneType ? "scene" : "suggested";
-        buckets[key].push({ s, i });
-      });
+      // Split suggestions into two zones:
+      //   "noticed" zone — waste alerts (zone === "noticed"), shown below
+      //   "suggestion" zone — everything else (pattern-based, or legacy without zone field)
+      // Each zone keeps a reference to the original full-array index so that
+      // data-action / data-index attributes remain correct for _attachListeners().
+      const allIndexed = suggestions.map((s, i) => ({ s, i }));
+      const suggestionsZoneItems = allIndexed.filter(({ s }) => s.zone !== "noticed").slice(0, 3);
+      const noticedZoneItems     = allIndexed.filter(({ s }) => s.zone === "noticed").slice(0, 5);
 
-      const sectionDefs = [
-        { key: "scene",     label: "Scenes",             isScene: true  },
-        { key: "suggested", label: "Suggested for You",  isScene: false },
-        { key: "stretch",   label: "Worth Trying",       isScene: false },
-      ];
+      const buildSectionsHtml = (zoneItems, zoneKind) => {
+        const buckets = { scene: [], suggested: [], stretch: [] };
+        zoneItems.forEach(({ s, i }) => {
+          const domain = s.entity_id?.split(".")[0] || "";
+          const isSceneType = s.type === "scene" || domain === "scene";
+          const key = (s.section && buckets[s.section] !== undefined)
+            ? s.section
+            : isSceneType ? "scene" : "suggested";
+          buckets[key].push({ s, i });
+        });
 
-      const sectionsHtml = sectionDefs
-        .filter(({ key }) => buckets[key].length > 0)
-        .map(({ key, label, isScene }) => {
-          const wrapClass = isScene ? "scene-list-wrap" : "list-wrap";
-          return `
-            ${this._config.show_section_headers ? `<div class="section-header">${label}</div>` : ""}
-            <div class="${wrapClass}">${buckets[key].map(({ s, i }) => makeRow(s, i, isScene)).join("")}</div>
-          `;
-        }).join("");
+        const sectionDefs = [
+          { key: "scene",     label: "Scenes",             isScene: true  },
+          { key: "suggested", label: "Suggested for You",  isScene: false },
+          { key: "stretch",   label: "Worth Trying",       isScene: false },
+        ];
 
-      bodyHtml = `<div class="sections">${sectionsHtml}</div>`;
+        return sectionDefs
+          .filter(({ key }) => buckets[key].length > 0)
+          .map(({ key, label, isScene }) => {
+            const wrapClass = isScene ? "scene-list-wrap" : "list-wrap";
+            return `
+              ${this._config.show_section_headers ? `<div class="section-header">${label}</div>` : ""}
+              <div class="${wrapClass}">${buckets[key].map(({ s, i }) => makeRow(s, i, isScene, zoneKind)).join("")}</div>
+            `;
+          }).join("");
+      };
+
+      let zonesHtml = "";
+      if (suggestionsZoneItems.length > 0) {
+        zonesHtml += `
+          <div class="zone zone-suggestions">
+            <div class="zone-header"><span class="zone-icon">&#9679;</span> Suggestions</div>
+            <div class="sections">${buildSectionsHtml(suggestionsZoneItems, "suggestion")}</div>
+          </div>`;
+      }
+      if (noticedZoneItems.length > 0) {
+        if (suggestionsZoneItems.length > 0) {
+          zonesHtml += `<div class="zone-divider"></div>`;
+        }
+        zonesHtml += `
+          <div class="zone zone-noticed">
+            <div class="zone-header"><span class="zone-icon">&#9679;</span> Noticed</div>
+            <div class="sections">${buildSectionsHtml(noticedZoneItems, "noticed")}</div>
+          </div>`;
+      }
+
+      bodyHtml = zonesHtml || `<div class="empty"><ha-icon icon="mdi:shimmer"></ha-icon>${this._config.empty_message}</div>`;
     }
 
     this.shadowRoot.innerHTML = `
@@ -901,6 +958,13 @@ class SmartSuggestionsCard extends SmartSuggestionsBaseCard {
         this._pendingAutomation = true;
         btn.disabled = true;
         SmartSuggestionsWS.send({ type: "save_automation", suggestion: s });
+      });
+    });
+    this.shadowRoot.querySelectorAll("[data-turn-off-eid]").forEach((btn) => {
+      btn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        const eid = btn.dataset.turnOffEid;
+        if (eid) this._turnOff(eid);
       });
     });
   }

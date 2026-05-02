@@ -3,7 +3,7 @@
  * AI-powered contextual action suggestions for Home Assistant
  */
 
-const CARD_VERSION = "3.0.0";
+const CARD_VERSION = "3.0.1";
 
 const DOMAIN_ICONS = {
   light: "mdi:lightbulb",
@@ -913,6 +913,16 @@ class SmartSuggestionsCard extends SmartSuggestionsBaseCard {
         if (vote === "down") {
           const suggestion = this._getSuggestions().find(s => s.entity_id === eid);
           reportOutcome(SmartSuggestionsWS.ws, eid, suggestion?.action || "toggle", "dismissed", confScore(suggestion));
+          if (suggestion?.signature && suggestion?.miner_type) {
+            SmartSuggestionsWS.send({
+              type: "dismiss",
+              signature: suggestion.signature,
+              miner_type: suggestion.miner_type,
+            });
+            // Optimistically remove from local state so it disappears immediately
+            this._wsSuggestions = (this._wsSuggestions || []).filter(s => s.signature !== suggestion.signature);
+            this.requestUpdate();
+          }
         }
       });
     });

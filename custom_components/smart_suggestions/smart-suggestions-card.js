@@ -924,6 +924,17 @@ class SmartSuggestionsCard extends SmartSuggestionsBaseCard {
             this.requestUpdate();
           }
         }
+        if (vote === "up") {
+          const suggestion = this._getSuggestions().find(s => s.entity_id === eid);
+          if (suggestion?.signature && suggestion?.miner_type) {
+            SmartSuggestionsWS.send({
+              type: "signal",
+              signature: suggestion.signature,
+              miner_type: suggestion.miner_type,
+              signal: "up",
+            });
+          }
+        }
       });
     });
     this.shadowRoot.querySelectorAll("[data-more-info]").forEach((el) => {
